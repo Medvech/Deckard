@@ -9121,10 +9121,7 @@ impl App {
                 q.characters.clear();
                 q.product = None;
             }
-            B::User(u) => {
-                q.user = u;
-                q.product = None;
-            }
+            B::User(u) => q.user = u,
             B::Favorites(f) => q.favorites = f,
             B::Product(p) => q.product = p,
             B::Types(t) => q.types = t,
