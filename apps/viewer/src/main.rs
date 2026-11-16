@@ -319,6 +319,7 @@ fn main() {
             match lane.as_deref() {
                 Some("velocity") | None => {}
                 Some("probability") => app.lane = layout::Lane::Probability,
+                Some("ratchet") => app.lane = layout::Lane::Ratchet,
                 Some("bend") => app.lane = layout::Lane::PitchBend,
                 Some(n) => {
                     if let Ok(n) = n.parse::<u8>() {
@@ -3791,6 +3792,7 @@ impl App {
                     None => (sound, i64::from(n.pitch)),
                 };
                 Some(Note {
+                    ratchet: Default::default(),
                     sound,
                     position: (n.start * PPQ as f64).round() as i64,
                     length: ((n.length * PPQ as f64).round() as i64).max(1),
@@ -5449,6 +5451,7 @@ impl App {
                     velocity: n.velocity,
                     probability: n.probability,
                     selected: self.selected.contains(n),
+                    ratchet: n.ratchet,
                 })
                 .collect();
             // (Playback's place in it while it's the focused scene's.)
@@ -7769,6 +7772,7 @@ impl App {
                 .iter()
                 .enumerate()
                 .map(|(i, &(a, b))| Note {
+                    ratchet: Default::default(),
                     expr: None,
                     sound: snd,
                     position: pat.start + ((a - a0) as f64 * ticks_per_frame) as i64,
@@ -8486,7 +8490,16 @@ impl App {
             self.status = format!("can't lengthen the pattern: {e}");
         }
         let old: Vec<Note> = pat.notes.iter().filter(|n| n.sound == s).copied().collect();
-        let note = Note { expr: None, sound: s, position: pat.start, length: ticks, pitch: 60, velocity: 100, probability: 100 };
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: s,
+            position: pat.start,
+            length: ticks,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         if let Err(e) = d.edit_notes("Record Loop", g, pi, &old, &[note]) {
             self.status = format!("the take isn't in the pattern: {e}");
         }
@@ -12064,6 +12077,7 @@ mod tests {
                 &[],
                 &[
                     deckard_model::Note {
+                        ratchet: Default::default(),
                         position: first,
                         length: bar / 2,
                         sound: 0,
@@ -12073,6 +12087,7 @@ mod tests {
                         expr: None,
                     },
                     deckard_model::Note {
+                        ratchet: Default::default(),
                         position: 4 * bar,
                         length: bar,
                         sound: 1,
@@ -12106,6 +12121,7 @@ mod tests {
             }
             let bar = doc.borrow().project().bar_length();
             let note = deckard_model::Note {
+                ratchet: Default::default(),
                 position: bar + bar / 4,
                 length: bar / 4,
                 sound: 0,
@@ -12161,7 +12177,16 @@ mod tests {
             d.assign_pattern(0, 0, Some(0)).unwrap();
             d.set_pattern_length(0, 0, 4 * bar).unwrap();
             d.set_length_auto(0, 0, false);
-            let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+            let n = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 1,
+                position: 0,
+                length: 100,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            };
             d.edit_notes("t", 0, 0, &[], &[n]).unwrap();
         }
         (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
@@ -14072,7 +14097,16 @@ mod tests {
         let before = &p.groups[g].patterns[pi].notes;
         let sound = (0..p.groups[g].sounds.len().min(8)).find(|s| before.iter().all(|n| n.sound != *s))?;
         let start = p.groups[g].patterns[pi].start;
-        let n = Note { expr: None, sound, position: start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let n = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().edit_notes("t", g, pi, &[], &[n]).unwrap();
         h.state_mut().sound = sound;
         h.run_steps(3);
@@ -14183,7 +14217,16 @@ mod tests {
         // Click an empty step: a note.
         let pos = grid_pos(&h, sound, 2 * 240 + 120);
         click(&mut h, pos);
-        let added = Note { expr: None, sound, position: start + 480, length: 240, pitch: 60, velocity: 100, probability: 100 };
+        let added = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start + 480,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         assert!(notes_of(&h).contains(&added), "click adds a note");
         assert_eq!(h.state().sound, sound, "and focuses its sound");
 
@@ -14250,7 +14293,16 @@ mod tests {
         assert_eq!(h.state().mouse, M::Select, "not while Keys plays notes");
         h.state_mut().keys.on = false;
 
-        let note = Note { expr: None, sound, position: start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().add_note(g, pi, note).unwrap();
         h.run_steps(2);
         let mine = |h: &Harness<'static, App>| notes_of(h).into_iter().filter(|n| n.sound == sound).collect::<Vec<_>>();
@@ -14310,6 +14362,107 @@ mod tests {
 
     /// ⌘C / ⌘V: a copy pastes after itself; ⌘X cuts. The event area's right-click
     /// menu: Paste at the mouse, the mouse modes, the Nudge Grid, Delete.
+    /// The note menu's Ratchet items change every selected note's ratchet, an undo
+    /// step each.
+    #[test]
+    fn the_ratchet_menu_sets_the_selected_notes_ratchets() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+        app.output = Some(Err("no audio in this test".into()));
+        app.new_project();
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        let (a, b, other) = (note(0), note(480), note(960));
+        layout::apply_acts(&mut app, vec![layout::Act::EditNotes { g: 0, p: 0, label: "t", remove: Vec::new(), add: vec![a, b, other] }]);
+        app.selected = vec![a, b];
+        let notes = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[app.pattern].notes.clone();
+        let changes: [fn(Ratchet) -> Ratchet; 3] =
+            [|r| Ratchet { repeats: 4, ..r }, |r| Ratchet { shape: Shape::Down, ..r }, |r| Ratchet { floor: 30, ..r }];
+        for change in changes {
+            let act = layout::ratchet_edit(&app, change).expect("a change");
+            layout::apply_acts(&mut app, vec![act]);
+        }
+        let want = Ratchet { repeats: 4, shape: Shape::Down, floor: 30, ceiling: 127 };
+        assert_eq!(notes(&app).iter().map(|n| n.ratchet).collect::<Vec<_>>(), [want, want, Ratchet::default()]);
+        assert!(app.selected.iter().all(|n| n.ratchet == want) && app.selected.len() == 2, "the selection follows");
+        assert!(layout::ratchet_edit(&app, |r| r).is_none(), "nothing to change, no edit");
+        for _ in 0..3 {
+            app.undo();
+        }
+        assert_eq!(notes(&app), [a, b, other]);
+    }
+
+    /// The note menu stays open while its Ratchet numbers are clicked, dragged and
+    /// typed into; choosing a shape closes it.
+    #[test]
+    fn the_ratchet_menu_stays_open_for_its_numbers() {
+        use deckard_model::ratchet::Shape;
+        let mut h = blank_harness(false);
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        layout::apply_acts(h.state_mut(), vec![layout::Act::EditNotes { g: 0, p: 0, label: "t", remove: Vec::new(), add: vec![note] }]);
+        h.state_mut().selected = vec![note];
+        h.run_steps(2);
+        let pos = grid_pos(&h, 0, 60);
+        right_click(&mut h, pos);
+        h.get_by_label("Ratchet ⏵").hover();
+        h.run_steps(3);
+        // A drag on Repeats' number sets the repeats, once, when it ends.
+        let at = h.get_by_label("Repeats").rect().right_center() + egui::vec2(20.0, 0.0);
+        let button = |h: &mut Harness<'static, App>, pos: Pos2, pressed: bool| {
+            h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        };
+        h.hover_at(at);
+        h.step();
+        button(&mut h, at, true);
+        for dx in [10.0, 20.0, 30.0] {
+            h.hover_at(at + egui::vec2(dx, 0.0));
+            h.step();
+            assert_eq!(notes_of(&h)[0].ratchet.repeats, 1, "nothing changes until the drag ends");
+        }
+        button(&mut h, at + egui::vec2(30.0, 0.0), false);
+        h.run_steps(3);
+        let repeats = notes_of(&h)[0].ratchet.repeats;
+        assert!(repeats > 1, "the drag set the repeats: {repeats}");
+        assert!(h.query_by_label("Repeats").is_some(), "still open after the drag");
+        // A click on it makes it a text field: type a number, Enter sets it.
+        h.hover_at(at);
+        h.step();
+        button(&mut h, at, true);
+        button(&mut h, at, false);
+        h.run_steps(3);
+        assert!(h.query_by_label("Repeats").is_some(), "still open after a click on the number");
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.step();
+        h.event(Event::Text("7".into()));
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(notes_of(&h)[0].ratchet.repeats, 7, "typed");
+        assert!(h.query_by_label("Repeats").is_some(), "still open after typing");
+        h.get_by_label("Down").click();
+        h.run_steps(3);
+        assert_eq!(notes_of(&h)[0].ratchet.shape, Shape::Down);
+        assert!(h.query_by_label("Repeats").is_none(), "a shape closes the menu");
+    }
+
     #[test]
     fn copy_paste_and_the_event_menu() {
         let Some(mut h) = harness(false, true) else { return };
@@ -14317,7 +14470,16 @@ mod tests {
         let (g, pi) = (h.state().group, h.state().pattern);
         let start = p.groups[g].patterns[pi].start;
         let Some(sound) = (0..p.groups[g].sounds.len().min(8)).find(|s| notes_of(&h).iter().all(|n| n.sound != *s)) else { return };
-        let note = Note { expr: None, sound, position: start, length: 240, pitch: 60, velocity: 100, probability: 100 };
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().add_note(g, pi, note).unwrap();
         h.state_mut().sound = sound;
         h.state_mut().selected = vec![note];
@@ -14670,7 +14832,7 @@ mod tests {
         (h.state_mut().group, h.state_mut().pattern, h.state_mut().sound) = (g, pi, sound);
         h.run_steps(3);
         let listed: Vec<Lane> = lane_list(&h).iter().map(|(l, _)| *l).collect();
-        assert_eq!(listed[..3], [Lane::Velocity, Lane::Probability, Lane::Controller(64)], "{listed:?}");
+        assert_eq!(listed[..4], [Lane::Velocity, Lane::Probability, Lane::Ratchet, Lane::Controller(64)], "{listed:?}");
         pick_lane(&mut h, Lane::Controller(64));
 
         // "+" opens the dialog; add the mod wheel.
@@ -15746,7 +15908,16 @@ mod tests {
             h.state().doc.as_ref().unwrap().borrow_mut().set_audio_in(0, s, &[pi], Some(0), "t").unwrap();
         }
         let start = project_of(&h).groups[0].patterns[pi].start;
-        let n = Note { expr: None, sound: s, position: start, length: PPQ, pitch: 60, velocity: 100, probability: 100 };
+        let n = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: s,
+            position: start,
+            length: PPQ,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().edit_notes("t", 0, pi, &[], &[n]).unwrap();
         h.run_steps(3);
         // The note: it moves a beat on, the audio stays.
@@ -16451,8 +16622,26 @@ mod tests {
         let start = project_of(&h).groups[g].patterns[pi].start;
         // Two notes of the focused sound, on the 16th grid.
         let sound = h.state().sound;
-        let a = Note { expr: None, sound, position: start + 960, length: 240, pitch: 60, velocity: 100, probability: 100 };
-        let b = Note { expr: None, sound, position: start + 2880, length: 240, pitch: 60, velocity: 80, probability: 100 };
+        let a = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start + 960,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        let b = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start + 2880,
+            length: 240,
+            pitch: 60,
+            velocity: 80,
+            probability: 100,
+        };
         let existing: Vec<Note> = notes_of(&h).into_iter().filter(|n| n.sound == sound).collect();
         h.state().doc.as_ref().unwrap().borrow_mut().edit_notes("setup", g, pi, &existing, &[a, b]).unwrap();
         h.state_mut().selected = vec![a, b];
@@ -16740,6 +16929,7 @@ mod tests {
         let start = project_of(&h).groups[g].patterns[0].start;
         let extra: Vec<Note> = (1..4)
             .map(|s| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: s,
                 position: start + s as i64 * 240,
