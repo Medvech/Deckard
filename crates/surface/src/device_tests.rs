@@ -108,10 +108,16 @@ fn config_reply(addr: usize, data: &[u8]) -> Vec<u8> {
 
 /// Independent encoder for a region-5 `0x22` write of an RGB triple.
 fn sync_write(addr: usize, rgb: [u8; 3]) -> Vec<u8> {
+    sync_write_bytes(addr, &rgb)
+}
+
+/// Independent encoder for a region-5 `0x22` write of arbitrary data (an RGB
+/// triple for pads, one byte for a button's `Led` record).
+fn sync_write_bytes(addr: usize, data: &[u8]) -> Vec<u8> {
     let mut payload = vec![5];
     payload.extend_from_slice(&(addr as u32).to_le_bytes());
-    payload.extend_from_slice(&[3, 0, 0]);
-    payload.extend_from_slice(&rgb);
+    payload.extend_from_slice(&(data.len() as u32).to_le_bytes()[..3]);
+    payload.extend_from_slice(data);
     sync_reply(0x22, &payload)
 }
 
@@ -272,9 +278,15 @@ fn mvawe_smc_pad_play_cc_toggles_transport() {
     for role in ["midi", "daw"] {
         let out = d.midi(role, &[0xB0, 27, 127], &v, Instant::now());
         assert!(out.contains(&Out::App(Action::Play)), "{role}: {out:?}");
-        assert!(out.contains(&midi(role, &[0xB0, 27, 127])), "LED feedback: {role}: {out:?}");
+        assert!(
+            !out.iter().any(|o| matches!(o, Out::Midi { .. })),
+            "button LEDs need an armed service session, so no feedback yet: {role}: {out:?}"
+        );
         let out = d.midi(role, &[0xB0, 27, 0], &v, Instant::now());
         assert!(!out.iter().any(|o| matches!(o, Out::App(Action::Play | Action::Stop))), "{role}: {out:?}");
+        // LEFT/RIGHT work in CC mode too.
+        assert!(d.midi(role, &[0xB0, 25, 127], &v, Instant::now()).contains(&Out::App(Action::Page(false))), "{role}");
+        assert!(d.midi(role, &[0xB0, 26, 127], &v, Instant::now()).contains(&Out::App(Action::Page(true))), "{role}");
     }
     // MK3's PLAY toggles: pressing again while playing stops.
     let mut playing = view();
@@ -349,6 +361,93 @@ fn smc_pad_service_reads_config_and_reports_ready() {
 }
 
 #[test]
+fn smc_pad_service_arms_buttons_and_drives_play_led() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    // Five 1-byte arm writes in slot 0, indexes LEFT..REC. The vectors are
+    // pinned from the hardware spike, not just derived from the encoder.
+    let arms = [
+        (0x16u32, 25u8, "F0 00 32 09 49 00 00 40 02 16 00 00 00 10 00 00 00 19 14 03 F7"),
+        (0x2D, 26, "F0 00 32 09 49 00 00 40 02 2D 00 00 00 10 00 00 00 1A 64 02 F7"),
+        (0x44, 27, "F0 00 32 09 49 00 00 40 02 44 00 00 00 10 00 00 00 1B 34 02 F7"),
+        (0x5B, 28, "F0 00 32 09 49 00 00 40 02 5B 00 00 00 10 00 00 00 1C 04 02 F7"),
+        (0x72, 29, "F0 00 32 09 49 00 00 40 02 72 00 00 00 10 00 00 00 1D 54 01 F7"),
+    ];
+    for (addr, note, wire) in arms {
+        let expected = sync_write_bytes(addr as usize, &[note]);
+        assert_eq!(expected, hex(wire), "pinned arm vector for {note}");
+        assert!(out.contains(&midi("service", &expected)), "{addr:#x}: {out:?}");
+    }
+
+    // view() starts not playing; flipping it on must light PLAY via DAW note-on.
+    let mut playing = view();
+    playing.playing = true;
+    let out = d.tick(&playing, t + Duration::from_millis(1700));
+    assert!(out.contains(&midi("daw", &[0x90, 27, 5])), "{out:?}");
+}
+
+#[test]
+fn smc_pad_service_emits_no_button_notes_before_ready() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    let mut out = d.open(&v, t);
+    out.extend(d.tick(&v, t));
+    assert!(
+        !out.iter().any(|o| matches!(o, Out::Midi { role, .. } if role == "daw")),
+        "unarmed button notes would do nothing but pollute the DAW port: {out:?}"
+    );
+}
+
+#[test]
+fn smc_pad_service_rearms_buttons_on_slot_change() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    // The last config reply lands at t+1500 ms, so the keep-alive is due at
+    // t+2000 ms. Its reply is only accepted while the state read is pending.
+    let keep = d.tick(&v, t + Duration::from_millis(2100));
+    assert!(keep.contains(&midi("service", &hex(STATE_READ))), "{keep:?}");
+
+    let out = d.midi("service", &state_reply(2, 1, 0), &v, t + Duration::from_millis(2150));
+    for (index, note) in (25..=29).enumerate() {
+        let addr = 3539 + index * 23 + 22;
+        assert!(
+            out.contains(&midi("service", &sync_write_bytes(addr, &[note as u8]))),
+            "slot 1 button {index} was not re-armed: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn smc_pad_service_button_leds_follow_state() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let mut v = view();
+    v.recording = true;
+    // Rust pages are 0-based; api.rs:1435 adds 1. Lua page 3 is past view()'s
+    // two pages: LEFT lights, RIGHT goes off.
+    v.control.page = 2;
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    let out = d.tick(&v, t + Duration::from_millis(1700));
+    assert!(out.contains(&midi("daw", &[0x90, 29, 5])), "REC: {out:?}");
+    assert!(out.contains(&midi("daw", &[0x90, 25, 5])), "LEFT: {out:?}");
+    assert!(out.contains(&midi("daw", &[0x90, 26, 0])), "RIGHT: {out:?}");
+
+    // Missing page metadata must not throw out of the tick handler.
+    let mut malformed = v.clone();
+    malformed.control = Default::default();
+    d.tick(&malformed, t + Duration::from_millis(1720));
+    assert_eq!(d.error(), None);
+}
+
+#[test]
 fn smc_pad_service_keeps_scanned_bank_on_unchanged_keepalive() {
     let mut d = Device::new("mvawe_smc_pad", None);
     let v = view();
@@ -402,6 +501,10 @@ fn smc_pad_service_rebuilds_map_on_bank_toggle() {
 
     let out = d.midi("service", &state_reply(2, 0, 1), &v, t + Duration::from_millis(2150));
     assert!(out.iter().any(|o| matches!(o, Out::Message(m) if m.contains("bank=7"))), "{out:?}");
+    assert!(
+        !out.iter().any(|o| matches!(o, Out::Midi { .. })),
+        "a bank toggle must not re-arm the slot's buttons: {out:?}"
+    );
 
     // Pad 1 now lives in bank 7, record 12 at 0xD70, and is redrawn.
     let out = d.tick(&v, t + Duration::from_millis(2200));

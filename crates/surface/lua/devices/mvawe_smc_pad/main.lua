@@ -8,7 +8,6 @@ local M = {}
 
 local PLAY, STOP, REC = 17, 18, 19
 local LEFT, RIGHT = 20, 21
-local GREEN, RED, BLUE, OFF = 5, 14, 21, 0
 
 -- Service session on the Private port: 00 59 | cmd | len24 LE | payload | ~sum,
 -- packed LSB-first 8→7 into one F0 … F7. Everything is driven from tick().
@@ -21,6 +20,12 @@ local RETRY, TIMEOUT, KEEPALIVE = 0.04, 5.0, 0.5
 local CHUNK, CHUNKS = 1009, 29
 local SLOT_BYTES, BANK_BYTES, RECORD_BYTES = 3539, 16 * 26, 26
 local PADS_AT, RGB_AT = 211, 5
+
+-- Region 5: five 23-byte button records per slot, with the arm byte at 22.
+-- The note selector written there is 25..29; the same note on the DAW port
+-- lights (velocity 5) or extinguishes (velocity 0) the physical LED.
+local BUTTON_BYTES, BUTTON_AT, BUTTON_NOTE = 23, 22, 25
+local BUTTONS = 5
 local PAD_NUMBER = { 13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4 }
 local DIM = 0.35
 local EMPTY_SLOT = { 255, 255, 255 }
@@ -182,6 +187,48 @@ local function status(s)
   return "SMC-PAD: service session ready (slot=" .. s.slot .. " bank=" .. s.bank .. ")"
 end
 
+-- Buttons are slot-scoped records, not bank-scoped. Arm on a fresh session and
+-- whenever keep-alive reports another slot; cache the factory bytes for close().
+local function arm_buttons()
+  local s = st.sess
+  s.btn_orig, s.btn_last = {}, {}
+  for index = 0, BUTTONS - 1 do
+    local addr = s.slot * SLOT_BYTES + index * BUTTON_BYTES + BUTTON_AT
+    s.btn_orig[index + 1] = s.config and s.config[addr + 1] or 0xFF
+    deckard.midi_send("service", write_request(addr, { BUTTON_NOTE + index }))
+  end
+end
+
+local function button_led(index, on)
+  deckard.midi_send("daw", { 0x90, BUTTON_NOTE + index, on and 5 or 0 })
+end
+
+-- Mirrors MK3's transport and navigation state. page/pages are read defensively:
+-- a malformed view must never throw out of a MIDI or tick handler.
+local function drive_buttons()
+  local s = st.sess
+  local v = deckard.state()
+  if type(v) ~= "table" then return end
+  local control = type(v.control) == "table" and v.control or nil
+  local page = control and type(control.page) == "number" and control.page or nil
+  local pages = control and control.pages or nil
+  local page_count = type(pages) == "table" and #pages or nil
+  local want = {
+    page and page > 1 or false,
+    page and page_count and page < page_count or false,
+    v.playing == true,
+    v.playing == true,
+    v.recording == true,
+  }
+  for index = 0, BUTTONS - 1 do
+    local on = want[index + 1]
+    if s.btn_last[index + 1] ~= on then
+      button_led(index, on)
+      s.btn_last[index + 1] = on
+    end
+  end
+end
+
 local function pad_colour(i, v)
   local group = v.groups[v.group]
   local sound = group and group.sounds[i]
@@ -262,9 +309,13 @@ local function service_reply(bytes)
       -- Compare with the raw state baseline, not the effective (possibly
       -- scanned) bank: an edited preset's 36..51 run can name a different bank.
       if bank ~= s.state_bank or slot ~= s.state_slot or toggle ~= s.state_toggle then
+        local slot_changed = slot ~= s.slot
         s.state_bank, s.state_slot, s.state_toggle = bank, slot, toggle
         s.toggle = toggle
         rebuild_map(s, bank, slot)
+        -- New slot: re-arm before the next tick redraws any pads. A bank toggle
+        -- leaves the button records untouched.
+        if slot_changed then arm_buttons() end
         s.last, s.redraw = {}, true
         deckard.message(status(s))
       end
@@ -289,24 +340,14 @@ local function service_reply(bytes)
       rebuild_map(s, bank, slot)
       s.last, s.redraw = {}, false
       s.state = "ready"
+      arm_buttons()
       s.keepalive_at = deckard.now() + KEEPALIVE
       deckard.message(status(s))
     end
   end
 end
 
-local function light(note, colour)
-  deckard.midi_send("daw", { 0x90, note, colour })
-end
-
-local function button_light(role, cc, on)
-  deckard.midi_send(role, { 0xB0, cc, on and 127 or 0 })
-end
-
 function M.open()
-  light(PLAY, OFF)
-  light(STOP, OFF)
-  light(REC, OFF)
 end
 
 function M.close()
@@ -321,25 +362,23 @@ function M.midi(role, bytes)
   local status, d1, d2 = bytes[1], bytes[2], bytes[3]
   local kind = status & 0xF0
 
-  -- Transport buttons can be configured as CCs (Play = CC 27, 127 press / 0
+  -- LEFT/RIGHT/transport can be configured as CCs (25..29, 127 press / 0
   -- release) on any port. Handle them before the encoder CCs consume the message.
-  if kind == 0xB0 and d1 >= 27 and d1 <= 29 then
+  -- LED feedback is driven from deckard.state() in tick() once the session is ready.
+  if kind == 0xB0 and d1 >= BUTTON_NOTE and d1 <= BUTTON_NOTE + 4 then
     if d2 > 0 then
-      local s = deckard.state()
-      if d1 == 27 then
+      if d1 == BUTTON_NOTE then
+        deckard.previous_page()
+      elseif d1 == BUTTON_NOTE + 1 then
+        deckard.next_page()
+      elseif d1 == 27 then
+        local s = deckard.state()
         if s.playing then deckard.stop() else deckard.play() end
-        button_light(role, d1, not s.playing)
-        light(PLAY, s.playing and GREEN or OFF)
-        light(STOP, s.playing and OFF or RED)
       elseif d1 == 28 then
         deckard.stop()
-        button_light(role, d1, false)
-        light(STOP, RED)
-        light(PLAY, OFF)
       else
+        local s = deckard.state()
         deckard.record(not s.recording, false)
-        button_light(role, d1, not s.recording)
-        light(REC, s.recording and OFF or RED)
       end
     end
     return
@@ -392,21 +431,14 @@ function M.midi(role, bytes)
 
   if d1 == PLAY then
     deckard.play()
-    light(PLAY, GREEN)
-    light(STOP, OFF)
   elseif d1 == STOP then
     deckard.stop()
-    light(STOP, RED)
-    light(PLAY, OFF)
   elseif d1 == REC then
     deckard.record(true, false)
-    light(REC, RED)
   elseif d1 == LEFT then
     deckard.previous_page()
-    light(LEFT, BLUE)
   elseif d1 == RIGHT then
     deckard.next_page()
-    light(RIGHT, BLUE)
   end
 end
 
@@ -432,6 +464,7 @@ function M.tick()
     return
   end
   if s.state == "ready" then
+    drive_buttons()
     if s.redraw and not s.pending then redraw_pads() end
     if not s.pending and now >= s.keepalive_at then
       send_request("keepalive")
