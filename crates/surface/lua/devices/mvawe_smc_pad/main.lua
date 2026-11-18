@@ -103,6 +103,15 @@ local CC = {
 }
 local prev, dir, back = {}, {}, {}
 
+-- A retry of the very same request must keep its original `sent` timestamp:
+-- 29 config chunks may legitimately take longer than TIMEOUT in total, but a
+-- single unanswered chunk must time out. A genuinely new request (next chunk,
+-- state → keepalive, etc.) starts a fresh timeout.
+local function same_request(a, b)
+  return a ~= nil and b ~= nil and a.kind == b.kind and a.cmd == b.cmd
+    and a.region == b.region and a.addr == b.addr and a.len == b.len
+end
+
 local function send_request(kind)
   local s = st.sess
   local bytes, pending
@@ -125,8 +134,8 @@ local function send_request(kind)
     return
   end
   local now = deckard.now()
+  if not same_request(s.pending, pending) then s.sent = now end
   s.pending = pending
-  s.sent = now
   s.next_at = now + RETRY
   deckard.midi_send("service", bytes)
 end
@@ -312,6 +321,13 @@ local function service_reply(bytes)
         local slot_changed = slot ~= s.slot
         s.state_bank, s.state_slot, s.state_toggle = bank, slot, toggle
         s.toggle = toggle
+        -- A different slot may hold an edited preset: re-scan its note run
+        -- before rebuilding the map. A toggle-only change forces bank index 7
+        -- and must never be overridden by a scan.
+        if slot_changed and toggle ~= 1 then
+          local scan = scanned_bank(s, slot)
+          if scan then bank = scan end
+        end
         rebuild_map(s, bank, slot)
         -- New slot: re-arm before the next tick redraws any pads. A bank toggle
         -- leaves the button records untouched.
@@ -387,10 +403,10 @@ function M.midi(role, bytes)
         deckard.previous_page()
       elseif d1 == BUTTON_NOTE + 1 then
         deckard.next_page()
-      elseif d1 == 27 then
+      elseif d1 == BUTTON_NOTE + 2 then
         local s = deckard.state()
         if s.playing then deckard.stop() else deckard.play() end
-      elseif d1 == 28 then
+      elseif d1 == BUTTON_NOTE + 3 then
         deckard.stop()
       else
         local s = deckard.state()
@@ -464,7 +480,9 @@ function M.tick()
   if s.pending then
     if now - s.sent > TIMEOUT then
       -- Restart from the identity query, but not in this tick. A partial
-      -- config image must not be resumed from a stale chunk.
+      -- config image must not be resumed from a stale chunk. Report the
+      -- restart once, so a stalled port is visible to the user.
+      deckard.message("SMC-PAD: service session timed out, restarting")
       s.pending = nil
       s.state = "query"
       s.chunk, s.config = 0, nil
