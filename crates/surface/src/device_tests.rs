@@ -857,3 +857,44 @@ fn pad_state_reaches_device_scripts() {
     assert!(d.open(&v, Instant::now()).contains(
         &Out::Message("keyboard:62:true:16:62".into())), "state not visible to the device VM");
 }
+
+#[test]
+fn smc_pad_note_19_toggles_record() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let mut v = view();
+    v.recording = true;
+    let out = d.midi("daw", &[0x90, 19, 127], &v, Instant::now());
+    assert!(out.contains(&Out::App(Action::Record { on: false, count_in: false })), "{out:?}");
+}
+
+#[test]
+fn smc_pad_keyboard_mode_redraws_when_state_changes() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let mut v = view();
+    v.pad_mode = "keyboard".into();
+    v.pad_keys = true;
+    v.pad_base = 60;
+    v.pad_notes = vec![60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79, 81, 83, 84, 86];
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    // A region-5 0x22 write packs with wire byte 3 == 0x09 (identity 0x45, read 0x0D).
+    let writes = |out: &[Out]| out.iter().filter(|o| matches!(o,
+        Out::Midi { role, bytes } if role == "service" && bytes.len() > 3 && bytes[3] == 0x09)).count();
+    // The handshake ends at t+1500 ms; these ticks stay clear of the first keepalive.
+    let t0 = t + Duration::from_millis(1600);
+    let at = |n: u64| t0 + Duration::from_millis(10 * n);
+    assert_eq!(writes(&d.tick(&v, at(0))), 2, "first ready tick records the baseline (still throttled)");
+    // Drain the mirror's remaining seven pairs so the settled tick is quiet.
+    for n in 1..=7 {
+        d.tick(&v, at(n));
+    }
+    assert_eq!(writes(&d.tick(&v, at(8))), 0, "settled");
+
+    v.pad_base = 62; // transposition
+    assert_eq!(writes(&d.tick(&v, at(9))), 16, "full rebuild");
+    v.group = 1;
+    assert_eq!(writes(&d.tick(&v, at(10))), 16, "group change");
+    v.sound = 2;
+    assert_eq!(writes(&d.tick(&v, at(11))), 16, "focused sound");
+}

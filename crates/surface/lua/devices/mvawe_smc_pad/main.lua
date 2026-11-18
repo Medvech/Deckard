@@ -239,6 +239,23 @@ local function drive_buttons()
 end
 
 local function pad_colour(i, v)
+  if v.pad_keys then
+    -- Keyboard/Chords: the focused sound's palette on every pad, as global.lua
+    -- draws the MK3's (no playing mix), bright on the root notes and held pads.
+    local group = v.groups[v.group]
+    local sound = group and group.sounds[v.sound]
+    if not sound then return { 0, 0, 0 } end
+    local note = v.pad_notes and v.pad_notes[i]
+    local root = v.pad_base or 60
+    local bright = deckard.pad_held(i) or (note and note < 128 and note % 12 == root % 12)
+    local colour = sound.color or EMPTY_SLOT
+    local factor = bright and 1 or DIM
+    local rgb = {}
+    for k = 1, 3 do
+      rgb[k] = math.max(0, math.min(255, math.floor((colour[k] or 0) * factor + 0.5)))
+    end
+    return rgb
+  end
   local group = v.groups[v.group]
   local sound = group and group.sounds[i]
   if not sound then return { 0, 0, 0 } end
@@ -475,7 +492,8 @@ function M.midi(role, bytes)
   elseif d1 == STOP then
     deckard.stop()
   elseif d1 == REC then
-    deckard.record(true, false)
+    local s = deckard.state()
+    deckard.record(not s.recording, false)
   elseif d1 == LEFT then
     deckard.previous_page()
   elseif d1 == RIGHT then
@@ -507,6 +525,25 @@ function M.tick()
     return
   end
   if s.state == "ready" then
+    local v = deckard.state()
+    if type(v) == "table" then
+      -- What the pads show changes with the focus, the mode and the scale: the
+      -- two-at-a-time colour mirror only follows held/playing, so force all
+      -- sixteen when any of it moves (as MK3's global.lua redraws on every state).
+      local sig = table.concat({
+        tostring(v.group), tostring(v.sound), tostring(v.scale and v.scale.root),
+        tostring(v.scale and v.scale.bank), tostring(v.scale and v.scale.kind),
+        tostring(v.pad_mode), tostring(v.pad_base), tostring(v.pad_keys),
+        table.concat(v.pad_notes or {}, ","),
+      }, "|")
+      if s.sig ~= sig then
+        local first = s.sig == nil
+        s.sig = sig
+        -- The first tick only records the baseline: the handshake's empty `last`
+        -- fills in two pads per tick as before. A later change is a real redraw.
+        if not first then s.last, s.redraw = {}, true end
+      end
+    end
     drive_buttons()
     if s.redraw and not s.pending then redraw_pads() end
     if not s.pending and now >= s.keepalive_at then
