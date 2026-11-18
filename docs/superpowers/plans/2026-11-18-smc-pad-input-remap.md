@@ -387,6 +387,7 @@ fn smc_pad_keyboard_mode_redraws_when_state_changes() {
     v.sound = 2;
     assert_eq!(writes(&d.tick(&v, t0 + Duration::from_millis(200))), 16, "focused sound");
 }
+```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
