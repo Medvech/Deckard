@@ -812,3 +812,29 @@ fn a_device_can_report_a_pad_and_see_it_held() {
     d.midi("midi", &[0x90, 17, 1, 127], &v, Instant::now());
     assert!(d.error().is_some_and(|e| e.contains("1..=16")), "{:?}", d.error());
 }
+
+#[test]
+fn smc_pad_notes_become_deckard_pad_events() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    // SMC 13 -> Deckard 1, at full velocity.
+    assert_eq!(d.midi("midi", &[0x90, 48, 127], &v, Instant::now()),
+        vec![Out::Pad { pad: 1, down: true, velocity: 1.0 }]);
+    assert_eq!(d.midi("midi", &[0x80, 48, 0], &v, Instant::now()),
+        vec![Out::Pad { pad: 1, down: false, velocity: 0.0 }]);
+    // SMC 1 -> Deckard 13; note-off on 0x90 with velocity 0 is a release too.
+    assert_eq!(d.midi("midi", &[0x90, 36, 64], &v, Instant::now()),
+        vec![Out::Pad { pad: 13, down: true, velocity: 64.0 / 127.0 }]);
+    assert_eq!(d.midi("midi", &[0x90, 36, 0], &v, Instant::now()),
+        vec![Out::Pad { pad: 13, down: false, velocity: 0.0 }]);
+    // Out-of-range notes and CCs are untouched.
+    assert!(d.midi("midi", &[0x90, 35, 127], &v, Instant::now()).is_empty());
+}
+
+#[test]
+fn smc_pad_takes_its_pad_notes_itself() {
+    let d = crate::device::devices(None);
+    let smc = d.iter().find(|m| m.id == "mvawe_smc_pad").expect("shipped");
+    assert!(smc.exclusive.iter().any(|r| r == "midi"), "{smc:?}");
+    assert!(smc.drums.is_empty(), "{smc:?}");
+}

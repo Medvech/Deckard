@@ -9,8 +9,8 @@ return {
     -- Only the Private port answers service SysEx.
     service = { "SMC-PAD-Private", "SMC-PAD-Virtual-Private" },
   },
-  -- Port 3's notes are buttons; the Private port is the service session.
-  exclusive = { "daw", "service" },
-  -- Master's MIDI-typed pads play the focused group's sounds.
-  drums = { "SMC-PAD-Virtual-Master", "SMC-PAD-Master", "MIDIIN1", "MIDIIN2" },
+  -- Port 3's notes are buttons, the Private port is the service session, and the
+  -- Master port's pad notes are read by the script and played through the app's
+  -- pad route (as the MK3's are), not by DECKARD's drum channel.
+  exclusive = { "daw", "service", "midi" },
 }

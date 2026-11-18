@@ -416,6 +416,15 @@ function M.midi(role, bytes)
     return
   end
 
+  -- Master's MIDI-typed pads: notes 36..51 are the sixteen pads. Map them to
+  -- Deckard's pad numbering and let the app play the current pad mode's notes.
+  if role == "midi" and (kind == 0x90 or kind == 0x80) and d1 >= 36 and d1 <= 51 then
+    local p = d1 - 35
+    local down = kind == 0x90 and d2 > 0
+    deckard.pad(PAD_NUMBER[p], down, (down and d2 or 0) / 127)
+    return
+  end
+
   -- Encoders: CCs on ports 1/2, values span 0..127; the delta is the turn amount.
   if role == "midi" and kind == 0xB0 then
     local knob = CC[d1]
