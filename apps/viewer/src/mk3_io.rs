@@ -296,6 +296,57 @@ pub fn pad_notes(route: &PadRoute, pad: usize) -> Vec<(usize, i64)> {
     }
 }
 
+/// The notes a pad press started, so its release stops the same notes even if the
+/// pad mode changed while held. The MK3 thread keeps this beside its pressure state;
+/// controllers driven from the app (the SMC) keep it here instead.
+#[derive(Default)]
+pub struct PadVoices {
+    /// The first note each pad started (group, sound, pitch).
+    sounding: [Option<(usize, usize, i64)>; 16],
+    /// A chord's other notes, by pad.
+    chord_rest: [Vec<(usize, usize, i64)>; 16],
+}
+
+impl PadVoices {
+    /// Play what `pad` (1–16) plays under `route`, at `from_pressure` (0–127), and
+    /// remember it for [`PadVoices::off`]. Returns the `Live::NoteOn`s to send.
+    pub fn on(&mut self, pad: usize, route: &PadRoute, from_pressure: i64) -> Vec<Live> {
+        let Some(i) = pad.checked_sub(1).filter(|&i| i < 16) else { return Vec::new() };
+        if !route.play {
+            return Vec::new();
+        }
+        let notes = pad_notes(route, pad);
+        let Some(&(sound, pitch)) = notes.first() else { return Vec::new() };
+        let group = route.group;
+        let velocity = Touching::hit_velocity(route, group, sound, from_pressure);
+        let others: Vec<_> = notes[1..].iter().map(|&(sound, pitch)| (group, sound, pitch)).collect();
+        self.sounding[i] = Some((group, sound, pitch));
+        self.chord_rest[i] = others.clone();
+        let mut out = Vec::with_capacity(notes.len());
+        out.push(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
+        for &(group, sound, pitch) in &others {
+            out.push(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
+        }
+        out
+    }
+
+    /// Stop the notes `pad` (1–16) started: a chord's other notes first, then its
+    /// first (the same order the MK3 thread releases them).
+    pub fn off(&mut self, pad: usize) -> Vec<Live> {
+        let Some(i) = pad.checked_sub(1).filter(|&i| i < 16) else { return Vec::new() };
+        let rest = std::mem::take(&mut self.chord_rest[i]);
+        let sounding = self.sounding[i].take();
+        let mut out = Vec::with_capacity(rest.len() + usize::from(sounding.is_some()));
+        for (group, sound, pitch) in rest {
+            out.push(Live::NoteRelease { group, sound, pitch });
+        }
+        if let Some((group, sound, pitch)) = sounding {
+            out.push(Live::NoteRelease { group, sound, pitch });
+        }
+        out
+    }
+}
+
 impl Mk3Io {
     /// Start looking for an MK3 (and keep looking: it may be plugged in later).
     pub fn start() -> Mk3Io {
@@ -376,6 +427,12 @@ impl Mk3Io {
 
     pub fn set_route(&self, route: PadRoute) {
         self.shared.lock().unwrap().route = Some(route);
+    }
+
+    /// The route the MK3 thread is playing pads with (set each frame), so a device
+    /// driven from the app can play the same notes. `None` before the first frame.
+    pub fn route(&self) -> Option<PadRoute> {
+        self.shared.lock().unwrap().route
     }
 
     /// Light the LEDs so (sent when they change).
@@ -995,5 +1052,40 @@ mod tests {
     fn pressure_on_a_silent_pad_is_dropped() {
         let r = route(mode(TouchMode::PolyAt));
         assert_eq!(Touching::default().pressure(1, None, 0.5, &r), vec![]);
+    }
+
+    #[test]
+    fn pad_voices_play_and_release_the_pad_mode_note() {
+        let mut voices = PadVoices::default();
+        let r = route(PadTouch::default());
+        assert_eq!(voices.on(13, &r, 100), vec![Live::NoteOn {
+            group: 0, sound: 12, pitch: PAD_PITCH, velocity: 100, length: i64::MAX }]);
+        assert_eq!(voices.off(13), vec![Live::NoteRelease { group: 0, sound: 12, pitch: PAD_PITCH }]);
+        assert!(voices.off(13).is_empty(), "a second release sends nothing");
+    }
+
+    #[test]
+    fn pad_voices_play_scale_and_chord_notes() {
+        let mut voices = PadVoices::default();
+        let mut r = route(PadTouch::default());
+        r.keys = Some((3, [60, 62, 64, 65, 67, 69, 71, 72,
+                           74, 76, 77, 79, 81, 83, 84, 86])); // pad 9 -> index 8 -> 74
+        assert_eq!(voices.on(9, &r, 90), vec![Live::NoteOn {
+            group: 0, sound: 3, pitch: 74, velocity: 90, length: i64::MAX }]);
+
+        r.chords = Some(std::array::from_fn(|_| [60, 64, 67, 128, 128, 128, 128, 128,
+                                                 128, 128, 128, 128, 128, 128, 128, 128]));
+        assert_eq!(voices.on(2, &r, 80).len(), 3, "Chords plays every note");
+        assert_eq!(voices.off(2).len(), 3, "and releases every note");
+    }
+
+    #[test]
+    fn pad_voices_release_stops_the_original_notes() {
+        let mut voices = PadVoices::default();
+        let r = route(PadTouch::default());
+        voices.on(4, &r, 100);
+        let changed = PadRoute { keys: Some((0, [64; 16])), ..r };
+        assert_eq!(voices.off(4), vec![Live::NoteRelease { group: 0, sound: 3, pitch: PAD_PITCH }],
+            "a mode change while held must not lose the original note");
     }
 }

@@ -1065,6 +1065,9 @@ pub struct App {
     midi_wired: bool,
     /// The Maschine MK3 over USB (started by `main`, not in tests).
     mk3: Option<mk3_io::Mk3Io>,
+    /// Notes started by pads of script-driven controllers (the SMC), so a release
+    /// stops what the press started even if the pad mode changed while held.
+    smc_voices: mk3_io::PadVoices,
     /// The Maschine JAM over USB (started by `main`, not in tests), and its script while
     /// it's connected.
     jam: Option<jam_io::JamIo>,
@@ -5116,6 +5119,35 @@ impl App {
         Some(host.state.borrow().hw.page_stack.last().copied() == Some(page))
     }
 
+    /// Group `g`'s sounds' Pad Touch, for what their held pads' pressure sends.
+    fn pad_touches(&self, group: usize) -> [deckard_model::pad_touch::PadTouch; 16] {
+        let mut t = [deckard_model::pad_touch::PadTouch::default(); 16];
+        if let Some(g) = self.doc.as_ref().and_then(|d| d.borrow().project().groups.get(group).cloned()) {
+            for (t, s) in t.iter_mut().zip(&g.sounds) {
+                *t = s.pad_touch;
+            }
+        }
+        t
+    }
+
+    /// Where the pads play under DECKARD's own controller layer, from the surface's
+    /// scripts. Used for pads of devices driven from the app (the SMC) when no MK3
+    /// route is available.
+    fn pad_route_from_surface(&self, view: &deckard_surface::View) -> mk3_io::PadRoute {
+        let pads = self.surface.pads(view);
+        let fixed = self.doc.as_ref().and_then(|d| d.borrow().num(deckard_doc::Target::Song, "fixed_velocity")).map_or(100, |v| v as i64);
+        mk3_io::PadRoute {
+            play: pads.play,
+            group: self.group,
+            keys: pads.keys,
+            chords: pads.chords,
+            velocity: view.fixed_velocity.then_some(fixed.clamp(0, 127)),
+            scaling: self.settings.velocity_scaling,
+            fixed: fixed.clamp(0, 127),
+            touches: self.pad_touches(self.group),
+        }
+    }
+
     /// The MK3's events since the last frame, to the layer that runs it (Maschine's
     /// scripts, or DECKARD's own): what the pads play, the lights and new screens.
     /// Hardware-free, so tests drive it with made-up events.
@@ -5126,16 +5158,6 @@ impl App {
         // by the scripts, say), for what the scripts see.
         self.update_slot_view();
         self.control_bridge();
-        // The group's sounds' Pad Touch, for what their held pads' pressure sends.
-        let touches = |app: &App, group: usize| {
-            let mut t = [deckard_model::pad_touch::PadTouch::default(); 16];
-            if let Some(g) = app.doc.as_ref().and_then(|d| d.borrow().project().groups.get(group).cloned()) {
-                for (t, s) in t.iter_mut().zip(&g.sounds) {
-                    *t = s.pad_touch;
-                }
-            }
-            t
-        };
         let mut mixer_on = None;
         let out = if let Some(Ok(c)) = &mut self.controller {
             for e in events {
@@ -5180,7 +5202,7 @@ impl App {
                 screens = c.screens().map(|s| (self.mk3_screens_sent, mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(s.px.clone()))));
             }
             let scaling = self.settings.velocity_scaling;
-            let route = mk3_io::PadRoute { play, group, keys, chords, velocity, scaling, fixed, touches: touches(self, group) };
+            let route = mk3_io::PadRoute { play, group, keys, chords, velocity, scaling, fixed, touches: self.pad_touches(group) };
             self.control_bridge();
             Mk3Out { route, leds, screens }
         } else {
@@ -5228,19 +5250,8 @@ impl App {
                 self.refresh_surface_settings();
                 view = self.surface_view();
             }
-            let fixed =
-                self.doc.as_ref().and_then(|d| d.borrow().num(deckard_doc::Target::Song, "fixed_velocity")).map_or(100, |v| v as i64);
-            let (pads, leds, screens) = self.surface.outputs(&view);
-            let route = mk3_io::PadRoute {
-                play: pads.play,
-                group: self.group,
-                keys: pads.keys,
-                chords: pads.chords,
-                velocity: view.fixed_velocity.then_some(fixed.clamp(0, 127)),
-                scaling: self.settings.velocity_scaling,
-                fixed: fixed.clamp(0, 127),
-                touches: touches(self, self.group),
-            };
+            let (_, leds, screens) = self.surface.outputs(&view);
+            let route = self.pad_route_from_surface(&view);
             Mk3Out { route, leds, screens: screens.map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))) }
         };
         if let Some(on) = mixer_on {
@@ -6774,7 +6785,37 @@ impl App {
                 deckard_surface::device::Out::Print(p) => self.print_notes(&p),
                 deckard_surface::device::Out::Message(m) => self.status = m,
                 deckard_surface::device::Out::Midi { .. } => {}
-                deckard_surface::device::Out::Pad { .. } => {}
+                deckard_surface::device::Out::Pad { pad, down, velocity } => {
+                    // Register the press in the current mode like an MK3 pad: focus,
+                    // step editing, shortcuts and the scripts' held state.
+                    let ev = if down { deckard_mk3::Event::PadOn(pad, velocity) } else { deckard_mk3::Event::PadOff(pad) };
+                    for a in self.surface.event(&ev, &view, now) {
+                        self.surface_act(a);
+                    }
+                    // Play what that mode says, with the MK3's route (or the surface's
+                    // own when no MK3 is plugged in).
+                    let route = self
+                        .mk3
+                        .as_ref()
+                        .and_then(mk3_io::Mk3Io::route)
+                        .unwrap_or_else(|| self.pad_route_from_surface(&view));
+                    let from_pressure = if down {
+                        ((mk3_io::pad_velocity(velocity, route.scaling) * 127.0).round() as i64).clamp(1, 127)
+                    } else {
+                        0
+                    };
+                    let lives = if down { self.smc_voices.on(pad, &route, from_pressure) } else { self.smc_voices.off(pad) };
+                    let has_engine = self.output.as_ref().is_some_and(|o| o.as_ref().is_ok_and(|o| o.has_engine()));
+                    for l in lives {
+                        if has_engine {
+                            if let Some(Ok(out)) = &self.output {
+                                out.live(l);
+                            }
+                        } else if let deckard_engine::Live::NoteOn { .. } = l {
+                            self.play_note(l);
+                        }
+                    }
+                }
             }
         }
         let error = self.midi_devices.errors().into_iter().next();
