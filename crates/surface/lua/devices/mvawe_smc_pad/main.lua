@@ -235,7 +235,10 @@ local function service_reply(bytes)
       s.state = "config"
     else
       local bank, slot, toggle = block_state(block)
-      if bank ~= s.bank or slot ~= s.slot or toggle ~= s.toggle then
+      -- Compare with the raw state baseline, not the effective (possibly
+      -- scanned) bank: an edited preset's 36..51 run can name a different bank.
+      if bank ~= s.state_bank or slot ~= s.state_slot or toggle ~= s.state_toggle then
+        s.state_bank, s.state_slot, s.state_toggle = bank, slot, toggle
         s.toggle = toggle
         rebuild_map(s, bank, slot)
         s.last, s.redraw = {}, true
@@ -253,6 +256,9 @@ local function service_reply(bytes)
     s.pending = nil
     if s.chunk == CHUNKS then
       local bank, slot, toggle = block_state(s.state_data)
+      -- Cache the state-derived triple before the scan override. Keep-alives
+      -- compare against this baseline; `s.bank` stays the effective bank.
+      s.state_bank, s.state_slot, s.state_toggle = bank, slot, toggle
       local scan = scanned_bank(s, slot)
       if scan then bank = scan end
       s.toggle = toggle

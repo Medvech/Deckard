@@ -80,17 +80,17 @@ fn state_reply(bank: u8, slot: u8, toggle: u8) -> Vec<u8> {
 }
 
 /// Live region-5 image: unarmed button bytes everywhere, plus one 36..51 note run
-/// and known RGBs in slot 0, bank 2 when `notes` is set.
-fn config_image(notes: bool) -> Vec<u8> {
+/// and known RGBs in slot 0 when `notes_bank` names a bank.
+fn config_image(notes_bank: Option<u8>) -> Vec<u8> {
     let mut img = vec![0u8; 8 * 3539];
     for slot in 0..8 {
         for index in 0..5 {
             img[slot * 3539 + index * 23 + 22] = 0xFF;
         }
     }
-    if notes {
+    if let Some(bank) = notes_bank {
         for r in 0..16 {
-            let at = 211 + 2 * 16 * 26 + r * 26;
+            let at = 211 + bank as usize * 16 * 26 + r * 26;
             img[at + 2] = 36 + r as u8;
             img[at + 5..at + 8].copy_from_slice(&[10, 20, 30]);
         }
@@ -108,7 +108,7 @@ fn config_reply(addr: usize, data: &[u8]) -> Vec<u8> {
 
 /// Drive the full service handshake: identity, region-4 state, 29 region-5 reads.
 /// Every `Out` is returned so callers can inspect requests and status messages.
-fn drive_handshake(d: &mut Device, v: &crate::View, t: Instant, bank: u8, slot: u8, toggle: u8, notes: bool) -> Vec<Out> {
+fn drive_handshake(d: &mut Device, v: &crate::View, t: Instant, bank: u8, slot: u8, toggle: u8, notes_bank: Option<u8>) -> Vec<Out> {
     let mut out = d.open(v, t);
     out.extend(d.tick(v, t));
     let t50 = t + Duration::from_millis(50);
@@ -116,7 +116,7 @@ fn drive_handshake(d: &mut Device, v: &crate::View, t: Instant, bank: u8, slot: 
     out.extend(d.tick(v, t50));
     out.extend(d.midi("service", &state_reply(bank, slot, toggle), v, t + Duration::from_millis(100)));
 
-    let image = config_image(notes);
+    let image = config_image(notes_bank);
     for i in 0..29usize {
         let now = t + Duration::from_millis(100 + 50 * i as u64);
         let tick = d.tick(v, now);
@@ -311,7 +311,7 @@ fn smc_pad_service_reads_config_and_reports_ready() {
     let mut d = Device::new("mvawe_smc_pad", None);
     let v = view();
     let t = Instant::now();
-    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, true);
+    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
     // Reads have wire byte 3 = 0x45 (identity) or 0x0D (0x23); the five button
     // arm writes added in Task 4 use 0x09 and must not be counted here.
     let reqs: Vec<Vec<u8>> = out
@@ -340,11 +340,46 @@ fn smc_pad_service_reads_config_and_reports_ready() {
 }
 
 #[test]
+fn smc_pad_service_keeps_scanned_bank_on_unchanged_keepalive() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    // The state block names bank 2, but the only 36..51 note run is in bank 3.
+    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, Some(3));
+    assert!(
+        out.iter().any(|o| matches!(o, Out::Message(m) if m.contains("ready") && m.contains("bank=3"))),
+        "{out:?}"
+    );
+
+    // The last config reply lands at t+1500 ms, so keep-alive is due at t+2000 ms.
+    let keep = d.tick(&v, t + Duration::from_millis(2100));
+    assert!(keep.contains(&midi("service", &hex(STATE_READ))), "{keep:?}");
+
+    let out = d.midi("service", &state_reply(2, 0, 0), &v, t + Duration::from_millis(2150));
+    assert!(
+        !out.iter().any(|o| matches!(o, Out::Message(_))),
+        "an unchanged state block must not emit a new status: {out:?}"
+    );
+    assert!(
+        !out.iter().any(|o| matches!(o, Out::Midi { role, .. } if role == "service")),
+        "an unchanged state block must not emit writes: {out:?}"
+    );
+
+    // A rebuild would redraw all 16 pads on the next tick using the state bank.
+    // No writes means the scanned bank's address map is still in effect.
+    let tick = d.tick(&v, t + Duration::from_millis(2200));
+    assert!(
+        !tick.iter().any(|o| matches!(o, Out::Midi { role, .. } if role == "service")),
+        "the scanned bank's addresses must be left intact: {tick:?}"
+    );
+}
+
+#[test]
 fn smc_pad_service_rebuilds_map_on_bank_toggle() {
     let mut d = Device::new("mvawe_smc_pad", None);
     let v = view();
     let t = Instant::now();
-    drive_handshake(&mut d, &v, t, 2, 0, 0, true);
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
 
     // A keep-alive request must be outstanding before its reply is accepted.
     let keep = d.tick(&v, t + Duration::from_millis(2100));
@@ -366,7 +401,7 @@ fn smc_pad_service_falls_back_when_notes_differ() {
     let mut d = Device::new("mvawe_smc_pad", None);
     let v = view();
     let t = Instant::now();
-    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, false);
+    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, None);
     // No bank carries a 36..51 note run: the state-derived bank stays in use.
     assert!(
         out.iter().any(|o| matches!(o, Out::Message(m) if m.contains("ready") && m.contains("bank=2"))),
