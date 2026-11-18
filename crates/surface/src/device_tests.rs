@@ -787,3 +787,28 @@ fn smc_pad_service_close_before_ready_sends_no_writes() {
     assert!(out.iter().all(|o| !matches!(o, Out::Midi { role, .. } if role == "service")));
     assert!(out.iter().all(|o| !matches!(o, Out::Midi { role, .. } if role == "daw")), "{out:?}");
 }
+
+#[test]
+fn a_device_can_report_a_pad_and_see_it_held() {
+    let (_tmp, dir) = test_device(r#"
+      return {
+        midi = function(role, bytes)
+          deckard.pad(bytes[2], bytes[3] == 1, bytes[4] / 127)
+          deckard.message(tostring(deckard.pad_held(bytes[2])))
+        end
+      }"#);
+    let mut d = Device::new("test", Some(dir));
+    let v = view();
+
+    assert_eq!(
+        d.midi("midi", &[0x90, 13, 1, 127], &v, Instant::now()),
+        vec![Out::Pad { pad: 13, down: true, velocity: 1.0 }, Out::Message("true".into())]
+    );
+    assert_eq!(
+        d.midi("midi", &[0x80, 13, 0, 0], &v, Instant::now()),
+        vec![Out::Pad { pad: 13, down: false, velocity: 0.0 }, Out::Message("false".into())]
+    );
+    // Out-of-range pads are a script error, not a silent no-op.
+    d.midi("midi", &[0x90, 17, 1, 127], &v, Instant::now());
+    assert!(d.error().is_some_and(|e| e.contains("1..=16")), "{:?}", d.error());
+}

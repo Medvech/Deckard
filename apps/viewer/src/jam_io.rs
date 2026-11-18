@@ -335,6 +335,7 @@ impl App {
                 Out::Print(p) => self.print_notes(&p),
                 Out::Message(m) => self.status = m,
                 Out::Midi { .. } => {}
+                Out::Pad { .. } => {}
             }
         }
     }

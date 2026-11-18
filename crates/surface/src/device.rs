@@ -78,6 +78,13 @@ pub enum Out {
         role: String,
         bytes: Vec<u8>,
     },
+    /// A pad of this device was pressed or released (pad from 1). The app feeds it to
+    /// `Surface::event` and plays the current pad mode's notes, as the MK3 does.
+    Pad {
+        pad: usize,
+        down: bool,
+        velocity: f64,
+    },
     Print(Print),
     /// A line for the status bar.
     Message(String),
@@ -351,7 +358,7 @@ fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
     }));
     api::install(&lua, &shared)?;
     let outs = Rc::new(RefCell::new(Vec::new()));
-    install(&lua, id, &outs)?;
+    install(&lua, id, &shared, &outs)?;
     let lights = Rc::new(RefCell::new(deckard_jam::Leds::blank()));
     // (Only a HID device's: a MIDI device's lights are its own bytes.)
     let manifest: Option<Table> = sources::run(&lua, sources, "device.lua").ok();
@@ -478,11 +485,24 @@ fn install_lights(lua: &Lua, lights: &Rc<RefCell<deckard_jam::Leds>>) -> mlua::R
 }
 
 /// The device's own part of the `deckard` API.
-fn install(lua: &Lua, id: &str, outs: &Rc<RefCell<Vec<Out>>>) -> mlua::Result<()> {
+fn install(lua: &Lua, id: &str, shared: &Rc<RefCell<Shared>>, outs: &Rc<RefCell<Vec<Out>>>) -> mlua::Result<()> {
     let d: Table = lua.globals().get("deckard")?;
     let id = id.to_string();
     let name = id.clone();
     d.set("device", lua.create_function(move |_, ()| Ok(name.clone()))?)?;
+    let sh = shared.clone();
+    let o = outs.clone();
+    d.set(
+        "pad",
+        lua.create_function(move |_, (pad, down, velocity): (usize, bool, f64)| {
+            if !(1..=16).contains(&pad) {
+                return Err(mlua::Error::runtime(format!("pad: {pad} isn't 1..=16")));
+            }
+            sh.borrow_mut().pads[pad - 1] = down;
+            o.borrow_mut().push(Out::Pad { pad, down, velocity: velocity.clamp(0.0, 1.0) });
+            Ok(())
+        })?,
+    )?;
     let o = outs.clone();
     d.set(
         "midi_send",

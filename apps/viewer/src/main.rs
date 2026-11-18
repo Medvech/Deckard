@@ -6769,6 +6769,7 @@ impl App {
                 deckard_surface::device::Out::Print(p) => self.print_notes(&p),
                 deckard_surface::device::Out::Message(m) => self.status = m,
                 deckard_surface::device::Out::Midi { .. } => {}
+                deckard_surface::device::Out::Pad { .. } => {}
             }
         }
         let error = self.midi_devices.errors().into_iter().next();
