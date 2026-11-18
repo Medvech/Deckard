@@ -897,4 +897,11 @@ fn smc_pad_keyboard_mode_redraws_when_state_changes() {
     assert_eq!(writes(&d.tick(&v, at(10))), 16, "group change");
     v.sound = 2;
     assert_eq!(writes(&d.tick(&v, at(11))), 16, "focused sound");
+    v.pad_mode = "pad".into();
+    v.pad_keys = false;
+    assert_eq!(writes(&d.tick(&v, at(12))), 16, "pad mode change");
+    v.scale_root = 62;
+    assert_eq!(writes(&d.tick(&v, at(13))), 16, "scale change");
+    v.pad_notes[0] = 61;
+    assert_eq!(writes(&d.tick(&v, at(14))), 16, "pad notes change");
 }
