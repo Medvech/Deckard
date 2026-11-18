@@ -16,7 +16,15 @@ local LOGO = { 0x00, 0x59 }
 local QUERY, READ, WRITE = 0x11, 0x23, 0x22
 local RETRY, TIMEOUT, KEEPALIVE = 0.04, 5.0, 0.5
 
-local st = { sess = { state = "query", sent = 0, next_at = 0 } }
+-- Region 5: eight slots of 3539 bytes. Pad records start at 211, sixteen per
+-- bank (416 bytes), each 26 bytes; the RGB triple sits at record offset 5.
+local CHUNK, CHUNKS = 1009, 29
+local SLOT_BYTES, BANK_BYTES, RECORD_BYTES = 3539, 16 * 26, 26
+local PADS_AT, RGB_AT = 211, 5
+local PAD_NUMBER = { 13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4 }
+local DIM = 0.35
+
+local st = { sess = { state = "query", sent = 0, next_at = 0, chunk = 0 } }
 
 local function logical(cmd, payload)
   local n = #payload
@@ -95,9 +103,18 @@ local function send_request(kind)
   if kind == "query" then
     bytes = pack7(logical(QUERY, {}))
     pending = { kind = "query", cmd = QUERY }
-  elseif kind == "state" then
+  elseif kind == "state" or kind == "keepalive" then
     bytes = pack7(logical(READ, { 4, 0, 0, 0, 0, 12, 0, 0 }))
-    pending = { kind = "state", cmd = READ, region = 4, addr = 0, len = 12 }
+    pending = { kind = kind, cmd = READ, region = 4, addr = 0, len = 12 }
+  elseif kind == "config" then
+    local addr = s.chunk * CHUNK
+    local len = s.chunk < CHUNKS - 1 and CHUNK or 60
+    bytes = pack7(logical(READ, {
+      5,
+      addr & 0xFF, (addr >> 8) & 0xFF, (addr >> 16) & 0xFF, (addr >> 24) & 0xFF,
+      len & 0xFF, (len >> 8) & 0xFF, (len >> 16) & 0xFF,
+    }))
+    pending = { kind = "config", cmd = READ, region = 5, addr = addr, len = len }
   else
     return
   end
@@ -108,26 +125,143 @@ local function send_request(kind)
   deckard.midi_send("service", bytes)
 end
 
+local function write_request(addr, data)
+  local payload = {
+    5,
+    addr & 0xFF, (addr >> 8) & 0xFF, (addr >> 16) & 0xFF, (addr >> 24) & 0xFF,
+    #data & 0xFF, (#data >> 8) & 0xFF, (#data >> 16) & 0xFF,
+  }
+  for i = 1, #data do payload[#payload + 1] = data[i] end
+  return pack7(logical(WRITE, payload))
+end
+
+local function reply_header(payload)
+  if #payload < 8 then return end
+  local region = payload[1]
+  local addr = payload[2] | (payload[3] << 8) | (payload[4] << 16) | (payload[5] << 24)
+  local len = payload[6] | (payload[7] << 8) | (payload[8] << 16)
+  return region, addr, len
+end
+
+-- The state block's byte 6 is the base bank, byte 10 the slot, byte 11 the
+-- bank toggle; toggle 1 selects image bank 8 (index 7) regardless of base bank.
+local function block_state(block)
+  local bank, slot, toggle = block[7], block[11], block[12]
+  if toggle == 1 then bank = 7 end
+  return bank, slot, toggle
+end
+
+-- An edited preset may no longer carry notes 36..51 in the bank the state
+-- bytes name. Accept the state-derived bank only when no other bank has that
+-- exact run (or when several do), so we never write to an arbitrary record.
+local function scanned_bank(s, slot)
+  local found, count = nil, 0
+  for bank = 0, 7 do
+    local match = true
+    for record = 0, 15 do
+      local at = slot * SLOT_BYTES + PADS_AT + bank * BANK_BYTES + record * RECORD_BYTES + 2
+      if s.config[at + 1] ~= 36 + record then match = false; break end
+    end
+    if match then found, count = bank, count + 1 end
+  end
+  return count == 1 and found or nil
+end
+
+local function rebuild_map(s, bank, slot)
+  s.bank, s.slot = bank, slot
+  s.addr, s.orig = {}, {}
+  for i = 1, 16 do
+    local addr = slot * SLOT_BYTES + PADS_AT + bank * BANK_BYTES + (PAD_NUMBER[i] - 1) * RECORD_BYTES + RGB_AT
+    s.addr[i] = addr
+    s.orig[i] = { s.config[addr + 1], s.config[addr + 2], s.config[addr + 3] }
+  end
+end
+
+local function status(s)
+  return "SMC-PAD: service session ready (slot=" .. s.slot .. " bank=" .. s.bank .. ")"
+end
+
+local function pad_colour(i, v)
+  local group = v.groups[v.group]
+  local sound = group and group.sounds[i]
+  if not sound then return { 0, 0, 0 } end
+  local held = deckard.pad_held(i)
+  if not sound.used and not sound.selected and not held and not sound.playing then return { 0, 0, 0 } end
+  local colour = sound.color
+  if not colour then return { 0, 0, 0 } end
+  local factor = (sound.selected or i == v.sound or held) and 1 or DIM
+  local rgb = {}
+  for k = 1, 3 do
+    local c = math.floor((colour[k] or 0) * factor + 0.5)
+    if sound.playing and not held then c = math.floor((c + 255) / 2 + 0.5) end
+    rgb[k] = math.max(0, math.min(255, c))
+  end
+  return rgb
+end
+
+-- Rebuilds are rare: redraw all pads at once instead of the tick's normal
+-- throttled colour mirror (Task 3).
+local function redraw_pads()
+  local s = st.sess
+  local v = deckard.state()
+  for i = 1, 16 do
+    local rgb = pad_colour(i, v)
+    deckard.midi_send("service", write_request(s.addr[i], rgb))
+    s.last[i] = rgb
+  end
+  s.redraw = false
+end
+
 local function service_reply(bytes)
   -- Parsing must never throw out of a MIDI handler and stall the session.
   local ok, cmd, payload = pcall(function() return parse_reply(unpack7(bytes)) end)
   if not ok or not cmd or not payload then return end
+  if cmd == 0 then return end -- write ACK
   local s = st.sess
   local pending = s.pending
   if not pending then return end
   if cmd == QUERY and pending.kind == "query" then
     s.pending = nil
     s.state = "state"
-  elseif cmd == READ and pending.kind == "state" then
-    if #payload < 8 then return end
-    local region = payload[1]
-    local addr = payload[2] | (payload[3] << 8) | (payload[4] << 16) | (payload[5] << 24)
-    local len = payload[6] | (payload[7] << 8) | (payload[8] << 16)
+  elseif cmd == READ and (pending.kind == "state" or pending.kind == "keepalive") then
+    local region, addr, len = reply_header(payload)
     if region ~= pending.region or addr ~= pending.addr or len ~= pending.len then return end
-    s.state_data = {}
-    for i = 9, #payload do s.state_data[#s.state_data + 1] = payload[i] end
+    local block = {}
+    for i = 9, #payload do block[#block + 1] = payload[i] end
+    if #block < 12 then return end
+    s.state_data = block
     s.pending = nil
-    s.state = "config"
+    if pending.kind == "state" then
+      s.state = "config"
+    else
+      local bank, slot, toggle = block_state(block)
+      if bank ~= s.bank or slot ~= s.slot or toggle ~= s.toggle then
+        s.toggle = toggle
+        rebuild_map(s, bank, slot)
+        s.last, s.redraw = {}, true
+        deckard.message(status(s))
+      end
+      s.keepalive_at = deckard.now() + KEEPALIVE
+    end
+  elseif cmd == READ and pending.kind == "config" then
+    local region, addr, len = reply_header(payload)
+    if not region or region ~= pending.region or addr ~= pending.addr or len ~= pending.len then return end
+    if #payload < 8 + len then return end
+    s.config = s.config or {}
+    for i = 1, len do s.config[addr + i] = payload[8 + i] end
+    s.chunk = s.chunk + 1
+    s.pending = nil
+    if s.chunk == CHUNKS then
+      local bank, slot, toggle = block_state(s.state_data)
+      local scan = scanned_bank(s, slot)
+      if scan then bank = scan end
+      s.toggle = toggle
+      rebuild_map(s, bank, slot)
+      s.last, s.redraw = {}, false
+      s.state = "ready"
+      s.keepalive_at = deckard.now() + KEEPALIVE
+      deckard.message(status(s))
+    end
   end
 end
 
@@ -253,9 +387,27 @@ function M.tick()
   local now = deckard.now()
   if s.pending then
     if now - s.sent > TIMEOUT then
-      -- Restart from the identity query, but not in this tick.
+      -- Restart from the identity query, but not in this tick. A partial
+      -- config image must not be resumed from a stale chunk.
       s.pending = nil
       s.state = "query"
+      s.chunk, s.config = 0, nil
+      return
+    end
+    -- A malformed or unmatched reply leaves the chunk outstanding: retry it
+    -- after RETRY instead of waiting for the full handshake timeout.
+    if s.state == "config" and now >= s.next_at then send_request("config") end
+    return
+  end
+  if s.state == "config" then
+    if now >= s.next_at then send_request("config") end
+    return
+  end
+  if s.state == "ready" then
+    if s.redraw then redraw_pads() end
+    if now >= s.keepalive_at then
+      send_request("keepalive")
+      s.keepalive_at = now + KEEPALIVE
     end
     return
   end

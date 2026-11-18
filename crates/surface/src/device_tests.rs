@@ -72,12 +72,62 @@ fn sync_reply(cmd: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Region-4 state block: the 12 data bytes carry bank at 6, slot at 10, toggle at 11.
-#[allow(dead_code)]
 fn state_reply(bank: u8, slot: u8, toggle: u8) -> Vec<u8> {
     sync_reply(
         0x23,
         &[4, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, bank, 0, 0, 0, slot, toggle],
     )
+}
+
+/// Live region-5 image: unarmed button bytes everywhere, plus one 36..51 note run
+/// and known RGBs in slot 0, bank 2 when `notes` is set.
+fn config_image(notes: bool) -> Vec<u8> {
+    let mut img = vec![0u8; 8 * 3539];
+    for slot in 0..8 {
+        for index in 0..5 {
+            img[slot * 3539 + index * 23 + 22] = 0xFF;
+        }
+    }
+    if notes {
+        for r in 0..16 {
+            let at = 211 + 2 * 16 * 26 + r * 26;
+            img[at + 2] = 36 + r as u8;
+            img[at + 5..at + 8].copy_from_slice(&[10, 20, 30]);
+        }
+    }
+    img
+}
+
+fn config_reply(addr: usize, data: &[u8]) -> Vec<u8> {
+    let mut payload = vec![5];
+    payload.extend_from_slice(&(addr as u32).to_le_bytes());
+    payload.extend_from_slice(&(data.len() as u32).to_le_bytes()[..3]);
+    payload.extend_from_slice(data);
+    sync_reply(0x23, &payload)
+}
+
+/// Drive the full service handshake: identity, region-4 state, 29 region-5 reads.
+/// Every `Out` is returned so callers can inspect requests and status messages.
+fn drive_handshake(d: &mut Device, v: &crate::View, t: Instant, bank: u8, slot: u8, toggle: u8, notes: bool) -> Vec<Out> {
+    let mut out = d.open(v, t);
+    out.extend(d.tick(v, t));
+    let t50 = t + Duration::from_millis(50);
+    out.extend(d.midi("service", &hex(IDENTITY_REPLY), v, t50));
+    out.extend(d.tick(v, t50));
+    out.extend(d.midi("service", &state_reply(bank, slot, toggle), v, t + Duration::from_millis(100)));
+
+    let image = config_image(notes);
+    for i in 0..29usize {
+        let now = t + Duration::from_millis(100 + 50 * i as u64);
+        let tick = d.tick(v, now);
+        let reads: Vec<&Out> = tick.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "service")).collect();
+        assert_eq!(reads.len(), 1, "one config request per tick ({i}): {tick:?}");
+        out.extend(tick);
+        let addr: usize = i * 1009;
+        let len: usize = if i < 28 { 1009 } else { 60 };
+        out.extend(d.midi("service", &config_reply(addr, &image[addr..addr + len]), v, now));
+    }
+    out
 }
 
 #[test]
@@ -254,4 +304,93 @@ fn smc_pad_service_handshake_restarts_after_timeout() {
     assert!(d.tick(&v, t + Duration::from_secs(6)).is_empty(), "pending request isn't repeated");
     // The next tick restarts from the identity query.
     assert_eq!(d.tick(&v, t + Duration::from_secs(6) + Duration::from_millis(40)), [midi("service", &hex(IDENTITY_QUERY))]);
+}
+
+#[test]
+fn smc_pad_service_reads_config_and_reports_ready() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, true);
+    // Reads have wire byte 3 = 0x45 (identity) or 0x0D (0x23); the five button
+    // arm writes added in Task 4 use 0x09 and must not be counted here.
+    let reqs: Vec<Vec<u8>> = out
+        .iter()
+        .filter_map(|o| match o {
+            Out::Midi { role, bytes } if role == "service" && (bytes[3] == 0x0D || bytes[3] == 0x45) => Some(bytes.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reqs.len(), 31, "identity + state + 29 config reads");
+    assert_eq!(reqs[0], hex("F0 00 32 45 00 00 00 40 7F F7"));
+    assert_eq!(reqs[1], hex("F0 00 32 0D 41 00 00 00 02 00 00 00 00 40 01 00 00 6F 01 F7"));
+    assert_eq!(reqs[2], hex("F0 00 32 0D 41 00 00 40 02 00 00 00 00 10 7E 00 00 06 00 F7"));
+    assert_eq!(reqs[30], hex("F0 00 32 0D 41 00 00 40 02 5C 5C 01 00 40 07 00 00 74 01 F7"));
+    // The ready message comes from the `midi` call that delivered the last chunk.
+    assert!(
+        out.iter().any(|o| matches!(o, Out::Message(m) if m.contains("ready") && m.contains("bank=2") && m.contains("slot=0"))),
+        "{out:?}"
+    );
+    // Ready sends the keep-alive state read, not another config read.
+    let keep = d.tick(&v, t + Duration::from_secs(3));
+    assert!(
+        keep.contains(&midi("service", &hex("F0 00 32 0D 41 00 00 00 02 00 00 00 00 40 01 00 00 6F 01 F7"))),
+        "{keep:?}"
+    );
+}
+
+#[test]
+fn smc_pad_service_rebuilds_map_on_bank_toggle() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, true);
+
+    // A keep-alive request must be outstanding before its reply is accepted.
+    let keep = d.tick(&v, t + Duration::from_millis(2100));
+    assert!(keep.contains(&midi("service", &hex(STATE_READ))), "{keep:?}");
+
+    let out = d.midi("service", &state_reply(2, 0, 1), &v, t + Duration::from_millis(2150));
+    assert!(out.iter().any(|o| matches!(o, Out::Message(m) if m.contains("bank=7"))), "{out:?}");
+
+    // Pad 1 now lives in bank 7, record 12 at 0xD70, and is redrawn.
+    let out = d.tick(&v, t + Duration::from_millis(2200));
+    assert!(
+        out.contains(&midi("service", &hex("F0 00 32 09 59 00 00 40 02 70 1A 00 00 30 00 00 00 7F 05 79 59 0F F7"))),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn smc_pad_service_falls_back_when_notes_differ() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    let out = drive_handshake(&mut d, &v, t, 2, 0, 0, false);
+    // No bank carries a 36..51 note run: the state-derived bank stays in use.
+    assert!(
+        out.iter().any(|o| matches!(o, Out::Message(m) if m.contains("ready") && m.contains("bank=2"))),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn smc_pad_service_ignores_a_wrong_address_config_reply() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    assert_eq!(d.error(), None);
+    let v = view();
+    let t = Instant::now();
+    assert_eq!(d.tick(&v, t), [midi("service", &hex(IDENTITY_QUERY))]);
+    d.midi("service", &hex(IDENTITY_REPLY), &v, t + Duration::from_millis(50));
+    assert_eq!(d.tick(&v, t + Duration::from_millis(50)), [midi("service", &hex(STATE_READ))]);
+    d.midi("service", &state_reply(2, 0, 0), &v, t + Duration::from_millis(100));
+    let first = hex("F0 00 32 0D 41 00 00 40 02 00 00 00 00 10 7E 00 00 06 00 F7");
+    assert_eq!(d.tick(&v, t + Duration::from_millis(100)), [midi("service", &first)]);
+
+    d.midi("service", &config_reply(999, &[0; 1009]), &v, t + Duration::from_millis(150));
+    assert_eq!(
+        d.tick(&v, t + Duration::from_millis(200)),
+        [midi("service", &first)],
+        "the bad reply didn't advance chunk 0"
+    );
 }
