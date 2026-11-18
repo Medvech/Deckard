@@ -23,8 +23,9 @@ local SLOT_BYTES, BANK_BYTES, RECORD_BYTES = 3539, 16 * 26, 26
 local PADS_AT, RGB_AT = 211, 5
 local PAD_NUMBER = { 13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4 }
 local DIM = 0.35
+local EMPTY_SLOT = { 255, 255, 255 }
 
-local st = { sess = { state = "query", sent = 0, next_at = 0, chunk = 0 } }
+local st = { sess = { state = "query", sent = 0, next_at = 0, chunk = 0, cursor = 1 } }
 
 local function logical(cmd, payload)
   local n = #payload
@@ -186,10 +187,13 @@ local function pad_colour(i, v)
   local sound = group and group.sounds[i]
   if not sound then return { 0, 0, 0 } end
   local held = deckard.pad_held(i)
-  if not sound.used and not sound.selected and not held and not sound.playing then return { 0, 0, 0 } end
-  local colour = sound.color
+  local chosen = sound.selected or i == v.sound
+  if not sound.used and not chosen and not held and not sound.playing then return { 0, 0, 0 } end
+  -- An empty but chosen slot shows the dim white empty-slot colour, never the
+  -- sound's stale RGB; global.lua lights it with its EMPTY_SLOT palette.
+  local colour, factor = sound.color, (chosen or held) and 1 or DIM
+  if not sound.used then colour, factor = EMPTY_SLOT, DIM end
   if not colour then return { 0, 0, 0 } end
-  local factor = (sound.selected or i == v.sound or held) and 1 or DIM
   local rgb = {}
   for k = 1, 3 do
     local c = math.floor((colour[k] or 0) * factor + 0.5)
@@ -210,6 +214,26 @@ local function redraw_pads()
     s.last[i] = rgb
   end
   s.redraw = false
+end
+
+-- At most two changed pads per tick, starting where the last tick stopped, so
+-- a full grid never blocks the UI thread and no pad is starved.
+local function mirror_colours()
+  local s = st.sess
+  local v = deckard.state()
+  local sent = 0
+  for n = 1, 16 do
+    if sent == 2 then break end
+    local i = (s.cursor + n - 2) % 16 + 1
+    local rgb = pad_colour(i, v)
+    local last = s.last[i]
+    if not last or last[1] ~= rgb[1] or last[2] ~= rgb[2] or last[3] ~= rgb[3] then
+      deckard.midi_send("service", write_request(s.addr[i], rgb))
+      s.last[i] = rgb
+      s.cursor = i % 16 + 1
+      sent = sent + 1
+    end
+  end
 end
 
 local function service_reply(bytes)
@@ -363,10 +387,8 @@ function M.midi(role, bytes)
   if role ~= "daw" or kind ~= 0x90 then return end
   if d2 == 0 then return end
 
-  if d1 >= 1 and d1 <= 16 then
-    light(d1, GREEN)
-    return
-  end
+  -- Pad LEDs are mirrored over the service SysEx session, not note feedback.
+  if d1 >= 1 and d1 <= 16 then return end
 
   if d1 == PLAY then
     deckard.play()
@@ -410,11 +432,12 @@ function M.tick()
     return
   end
   if s.state == "ready" then
-    if s.redraw then redraw_pads() end
-    if now >= s.keepalive_at then
+    if s.redraw and not s.pending then redraw_pads() end
+    if not s.pending and now >= s.keepalive_at then
       send_request("keepalive")
       s.keepalive_at = now + KEEPALIVE
     end
+    if not s.pending then mirror_colours() end
     return
   end
   if (s.state == "query" or s.state == "state") and now >= s.next_at then

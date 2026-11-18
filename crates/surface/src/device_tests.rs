@@ -106,6 +106,15 @@ fn config_reply(addr: usize, data: &[u8]) -> Vec<u8> {
     sync_reply(0x23, &payload)
 }
 
+/// Independent encoder for a region-5 `0x22` write of an RGB triple.
+fn sync_write(addr: usize, rgb: [u8; 3]) -> Vec<u8> {
+    let mut payload = vec![5];
+    payload.extend_from_slice(&(addr as u32).to_le_bytes());
+    payload.extend_from_slice(&[3, 0, 0]);
+    payload.extend_from_slice(&rgb);
+    sync_reply(0x22, &payload)
+}
+
 /// Drive the full service handshake: identity, region-4 state, 29 region-5 reads.
 /// Every `Out` is returned so callers can inspect requests and status messages.
 fn drive_handshake(d: &mut Device, v: &crate::View, t: Instant, bank: u8, slot: u8, toggle: u8, notes_bank: Option<u8>) -> Vec<Out> {
@@ -351,6 +360,12 @@ fn smc_pad_service_keeps_scanned_bank_on_unchanged_keepalive() {
         "{out:?}"
     );
 
+    // Prime the colour mirror (16 pads, 2 writes per tick) before the keep-alive
+    // window. From here on, only a map rebuild could emit writes to these pads.
+    for i in 0..8 {
+        d.tick(&v, t + Duration::from_millis(1550 + 20 * i));
+    }
+
     // The last config reply lands at t+1500 ms, so keep-alive is due at t+2000 ms.
     let keep = d.tick(&v, t + Duration::from_millis(2100));
     assert!(keep.contains(&midi("service", &hex(STATE_READ))), "{keep:?}");
@@ -427,5 +442,84 @@ fn smc_pad_service_ignores_a_wrong_address_config_reply() {
         d.tick(&v, t + Duration::from_millis(200)),
         [midi("service", &first)],
         "the bad reply didn't advance chunk 0"
+    );
+}
+
+#[test]
+fn smc_pad_service_mirrors_mk3_pad_colours() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    // Pad 1 is the focused sound: full RGB [255,66,62], at slot 0 bank 2 record 12 (0x550).
+    let out = d.tick(&v, t + Duration::from_millis(1700));
+    assert_eq!(sync_write(0x550, [255, 66, 62]), hex("F0 00 32 09 59 00 00 40 02 50 0A 00 00 30 00 00 00 7F 05 79 19 02 F7"));
+    assert!(out.contains(&midi("service", &sync_write(0x550, [255, 66, 62]))), "{out:?}");
+    assert!(out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "service")).count() <= 2);
+}
+
+#[test]
+fn smc_pad_service_writes_nothing_before_ready() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    assert_eq!(d.tick(&v, t), [midi("service", &hex("F0 00 32 45 00 00 00 40 7F F7"))]);
+}
+
+#[test]
+fn smc_pad_service_mirrors_playing_colour_as_a_static_white_mix() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let mut v = view();
+    v.groups[0].sounds[0].playing = true;
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    let out = d.tick(&v, t + Duration::from_millis(1700));
+    assert!(
+        out.contains(&midi("service", &sync_write(0x550, [255, 161, 159]))),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn smc_pad_service_mirrors_an_unused_chosen_slot_as_dim_white() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let mut v = view();
+    v.groups[0].sounds[0].used = false;
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    let out = d.tick(&v, t + Duration::from_millis(1700));
+    assert!(
+        out.contains(&midi("service", &sync_write(0x550, [89, 89, 89]))),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn smc_pad_service_throttles_rgb_writes_to_two_per_tick() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let mut v = view();
+    // Give every pad a used sound and a colour, so all 16 addresses need a write.
+    for sound in &mut v.groups[0].sounds {
+        sound.used = true;
+        sound.rgb = [100, 150, 200];
+    }
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+
+    let writes = |out: &[Out]| out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "service")).count();
+    let first = d.tick(&v, t + Duration::from_millis(1600));
+    assert_eq!(writes(&first), 2, "{first:?}");
+    let second = d.tick(&v, t + Duration::from_millis(1620));
+    assert_eq!(writes(&second), 2, "{second:?}");
+    assert!(
+        first.contains(&midi("service", &sync_write(0x550, [100, 150, 200]))),
+        "pad 1 is written first: {first:?}"
+    );
+    assert!(
+        !second.contains(&midi("service", &sync_write(0x550, [100, 150, 200]))),
+        "the round-robin cursor advances: {second:?}"
     );
 }
