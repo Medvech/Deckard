@@ -26,7 +26,8 @@ local PADS_AT, RGB_AT = 211, 5
 -- lights (velocity 5) or extinguishes (velocity 0) the physical LED.
 local BUTTON_BYTES, BUTTON_AT, BUTTON_NOTE = 23, 22, 25
 local BUTTONS = 5
-local PAD_NUMBER = { 13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4 }
+-- One to one: SMC pad N is Deckard pad N, for both hits and the LED records.
+local PAD_NUMBER = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }
 local DIM = 0.35
 local EMPTY_SLOT = { 255, 255, 255 }
 

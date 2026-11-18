@@ -4,6 +4,12 @@
 
 **Goal:** Make the M-Vave SMC-PAD's presses land on the Deckard pad its LED lights, play what the current pad mode says (as the MK3 does), redraw its LEDs on group/mode/transposition changes, and keep its transport LEDs in sync.
 
+> **Amendment (2026-11-19, after hardware testing):** Task 2's `PAD_NUMBER` is now the
+> identity `{1..16}` (SMC pad N = Deckard pad N, for hits and LEDs), reversing the flip
+> originally specified. Task 4's `View.pad_*` is also fed from `Mk3Io::route()` when an
+> MK3 is connected so its mode buttons redraw the SMC pads; the surface's `lib.pads`
+> alone missed those changes. Both came from the user's hardware report.
+
 **Architecture:** Pad presses become a device-script API call `deckard.pad(pad, down, velocity)` that emits a new `Out::Pad` from the device VM to the app. The app feeds it to `Surface::event()` (focus, step editing, shortcuts, held state) and to a small `PadVoices` helper that reuses the MK3's `pad_notes()`/`pad_velocity()` to emit engine `Live` notes. Pad mode/base/keys/notes flow from the main surface Lua VM through `View` into `deckard.state()` so the SMC script can mirror keyboard/chords LEDs and force a full rebuild when state changes. The SMC's `midi` role becomes exclusive so its notes no longer reach the engine's drum mapper (which would double-play). The MK3 and JAM paths are not refactored.
 
 **Tech Stack:** Rust (mlua device/surface host, viewer app, engine `Live` events), Lua 5.4 device script, cargo tests.
@@ -12,8 +18,8 @@
 
 ## Global Constraints
 
-- `PAD_NUMBER = { 13,14,15,16, 9,10,11,12, 5,6,7,8, 1,2,3,4 }` (1-based, Deckard pad for each SMC pad). It is an involution; do not change it or any RGB address.
-- SMC pad *p* sends note `35 + p` on the `midi` role (notes 36..51). Deckard pad = `PAD_NUMBER[p]`.
+- ~~`PAD_NUMBER = { 13,14,15,16, 9,10,11,12, 5,6,7,8, 1,2,3,4 }` (1-based, Deckard pad for each SMC pad). It is an involution; do not change it or any RGB address.~~ **SUPERSEDED 2026-11-19 by hardware feedback:** `PAD_NUMBER` is now the identity `{1..16}` — SMC pad *p* is Deckard pad *p*, for both input and LED addresses. All "flip" text below is historical.
+- SMC pad *p* sends note `35 + p` on the `midi` role (notes 36..51). Deckard pad = `PAD_NUMBER[p]` (now *p* itself).
 - `deckard.state()` uses 1-based `group`/`sound`, `sound.color` is an RGB table indexed 1..3, `scale.bank`/`scale.kind` are 1-based, `scale.root` is a MIDI note.
 - `pads.keys()` is true only for modes `"keyboard"`/`"chords"`; `pads.notes()` always returns 16 entries and uses 128 for "none". Step+Keyboard must keep pad-mode LEDs (matches `global.lua:581`).
 - `PadRoute` is `Copy`; `PadRoute::scaling` comes from `settings.velocity_scaling`, `fixed` from the song's `fixed_velocity` (clamped 0..127), `velocity` from `View.fixed_velocity`.
@@ -24,7 +30,7 @@
 
 ## Review Focus
 
-- **SMC 13/9/5/1 must become Deckard 1/5/9/13** (and the rest of each block) — test in Task 2 (`smc_pad_notes_become_deckard_pad_events`).
+- ~~**SMC 13/9/5/1 must become Deckard 1/5/9/13** (and the rest of each block)~~ **SUPERSEDED:** identity mapping is now required; test in Task 2 (`smc_pad_notes_become_deckard_pad_events`, updated to identity).
 - **A remapped press must play the mode's notes, not always C3** (Keyboard → scale note, Chords → all chord notes) — tests in Task 4 (`pad_voices_*`).
 - **A full 16-pad rebuild must follow a group / mode / transposition / focused-sound / scale change**, not just the 2-per-tick mirror — test in Task 5 (`smc_pad_keyboard_mode_redraws_when_state_changes`).
 - **Record note 19 must toggle**, matching CC 29 and the MK3 — test in Task 5 (`smc_pad_note_19_toggles_record`).
@@ -118,6 +124,9 @@ git commit -m "feat(surface): let device scripts report pad presses"
 - Produces: SMC note 36+(*p*−1) → `Out::Pad { pad: PAD_NUMBER[p], down, velocity: d2/127 }`; manifest `exclusive` contains `"midi"` and `drums` is empty.
 
 - [ ] **Step 1: Write the failing tests**
+
+The flip examples in this historical test snippet were replaced by identity assertions
+after hardware testing (note 36 → pad 1, note 51 → pad 16, note 40 → pad 5).
 
 ```rust
 #[test]

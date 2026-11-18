@@ -5406,7 +5406,13 @@ impl App {
             euclid: self.euclid_view(c.level, c.page, head),
             random: self.random_view(c.level, c.page, head),
         };
-        let (pad_mode, pad_base, pad_keys, pad_notes) = self.surface.pads_state();
+        let (mut pad_mode, mut pad_base, mut pad_keys, mut pad_notes) = self.surface.pads_state();
+        if let Some(route) = self.mk3.as_ref().and_then(mk3_io::Mk3Io::route) {
+            // The MK3's mode buttons don't touch the surface's `lib.pads`. Mirror
+            // the route the MK3 actually plays so device LEDs redraw on a mode
+            // change, and colour them from the same notes the pads play.
+            (pad_mode, pad_base, pad_keys, pad_notes) = mk3_io::pad_state(&route);
+        }
         let mut v = View {
             pad_mode,
             pad_base,

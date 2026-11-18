@@ -596,10 +596,10 @@ fn smc_pad_service_rebuilds_map_on_bank_toggle() {
         "a bank toggle must not re-arm the slot's buttons: {out:?}"
     );
 
-    // Pad 1 now lives in bank 7, record 12 at 0xD70, and is redrawn.
+    // Pad 1 now lives in bank 7, record 0 at 0xC38, and is redrawn.
     let out = d.tick(&v, t + Duration::from_millis(2200));
     assert!(
-        out.contains(&midi("service", &hex("F0 00 32 09 59 00 00 40 02 70 1A 00 00 30 00 00 00 7F 05 79 59 0F F7"))),
+        out.contains(&midi("service", &hex("F0 00 32 09 59 00 00 40 02 38 18 00 00 30 00 00 00 7F 05 79 21 03 F7"))),
         "{out:?}"
     );
 }
@@ -632,8 +632,8 @@ fn smc_pad_service_rescans_bank_on_slot_change() {
         assert!(out.contains(&midi("service", &sync_write_bytes(addr, &[note as u8]))), "{out:?}");
     }
 
-    // Pad 1 now lives in slot 1, bank 3, record 12 (0x14C3) and is redrawn.
-    let addr = 3539 + 211 + 3 * 16 * 26 + 12 * 26 + 5;
+    // Pad 1 now lives in slot 1, bank 3, record 0 (0x138B) and is redrawn.
+    let addr = 3539 + 211 + 3 * 16 * 26 + 0 * 26 + 5;
     let redraw = d.tick(&v, t + Duration::from_millis(2200));
     assert!(redraw.contains(&midi("service", &sync_write(addr, [255, 66, 62]))), "{redraw:?}");
 }
@@ -679,10 +679,10 @@ fn smc_pad_service_mirrors_mk3_pad_colours() {
     let t = Instant::now();
     drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
 
-    // Pad 1 is the focused sound: full RGB [255,66,62], at slot 0 bank 2 record 12 (0x550).
+    // Pad 1 is the focused sound: full RGB [255,66,62], at slot 0 bank 2 record 0 (0x418).
     let out = d.tick(&v, t + Duration::from_millis(1700));
-    assert_eq!(sync_write(0x550, [255, 66, 62]), hex("F0 00 32 09 59 00 00 40 02 50 0A 00 00 30 00 00 00 7F 05 79 19 02 F7"));
-    assert!(out.contains(&midi("service", &sync_write(0x550, [255, 66, 62]))), "{out:?}");
+    assert_eq!(sync_write(0x418, [255, 66, 62]), hex("F0 00 32 09 59 00 00 40 02 18 08 00 00 30 00 00 00 7F 05 79 61 05 F7"));
+    assert!(out.contains(&midi("service", &sync_write(0x418, [255, 66, 62]))), "{out:?}");
     assert!(out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "service")).count() <= 2);
 }
 
@@ -704,7 +704,7 @@ fn smc_pad_service_mirrors_playing_colour_as_a_static_white_mix() {
 
     let out = d.tick(&v, t + Duration::from_millis(1700));
     assert!(
-        out.contains(&midi("service", &sync_write(0x550, [255, 161, 159]))),
+        out.contains(&midi("service", &sync_write(0x418, [255, 161, 159]))),
         "{out:?}"
     );
 }
@@ -719,7 +719,7 @@ fn smc_pad_service_mirrors_an_unused_chosen_slot_as_dim_white() {
 
     let out = d.tick(&v, t + Duration::from_millis(1700));
     assert!(
-        out.contains(&midi("service", &sync_write(0x550, [89, 89, 89]))),
+        out.contains(&midi("service", &sync_write(0x418, [89, 89, 89]))),
         "{out:?}"
     );
 }
@@ -742,11 +742,11 @@ fn smc_pad_service_throttles_rgb_writes_to_two_per_tick() {
     let second = d.tick(&v, t + Duration::from_millis(1620));
     assert_eq!(writes(&second), 2, "{second:?}");
     assert!(
-        first.contains(&midi("service", &sync_write(0x550, [100, 150, 200]))),
+        first.contains(&midi("service", &sync_write(0x418, [100, 150, 200]))),
         "pad 1 is written first: {first:?}"
     );
     assert!(
-        !second.contains(&midi("service", &sync_write(0x550, [100, 150, 200]))),
+        !second.contains(&midi("service", &sync_write(0x418, [100, 150, 200]))),
         "the round-robin cursor advances: {second:?}"
     );
 }
@@ -761,8 +761,8 @@ fn smc_pad_service_restores_original_pad_rgb_on_close() {
     // 16 pad RGBs + 5 button Led bytes on the service port; 5 note-offs on daw.
     assert_eq!(out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "service")).count(), 21);
     assert_eq!(out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "daw")).count(), 5);
-    // Pad 1's record 12 at 0x550 originally held RGB [10,20,30].
-    assert!(out.contains(&midi("service", &sync_write(0x550, [10, 20, 30]))), "{out:?}");
+    // Pad 1's record 0 at 0x418 originally held RGB [10,20,30].
+    assert!(out.contains(&midi("service", &sync_write(0x418, [10, 20, 30]))), "{out:?}");
     // Every Led byte was FF originally; play is at 0x44.
     assert!(out.contains(&midi("service", &sync_write_bytes(0x44, &[0xFF]))), "{out:?}");
     for note in 25..=29 {
@@ -817,18 +817,40 @@ fn a_device_can_report_a_pad_and_see_it_held() {
 fn smc_pad_notes_become_deckard_pad_events() {
     let mut d = Device::new("mvawe_smc_pad", None);
     let v = view();
-    // SMC 13 -> Deckard 1, at full velocity.
-    assert_eq!(d.midi("midi", &[0x90, 48, 127], &v, Instant::now()),
+    // One to one: SMC's first pad (note 36) is Deckard's pad 1.
+    assert_eq!(d.midi("midi", &[0x90, 36, 127], &v, Instant::now()),
         vec![Out::Pad { pad: 1, down: true, velocity: 1.0 }]);
-    assert_eq!(d.midi("midi", &[0x80, 48, 0], &v, Instant::now()),
+    assert_eq!(d.midi("midi", &[0x80, 36, 0], &v, Instant::now()),
         vec![Out::Pad { pad: 1, down: false, velocity: 0.0 }]);
-    // SMC 1 -> Deckard 13; note-off on 0x90 with velocity 0 is a release too.
-    assert_eq!(d.midi("midi", &[0x90, 36, 64], &v, Instant::now()),
-        vec![Out::Pad { pad: 13, down: true, velocity: 64.0 / 127.0 }]);
-    assert_eq!(d.midi("midi", &[0x90, 36, 0], &v, Instant::now()),
-        vec![Out::Pad { pad: 13, down: false, velocity: 0.0 }]);
+    // Its last pad (note 51) is Deckard's pad 16; note-off at velocity 0 releases too.
+    assert_eq!(d.midi("midi", &[0x90, 51, 64], &v, Instant::now()),
+        vec![Out::Pad { pad: 16, down: true, velocity: 64.0 / 127.0 }]);
+    assert_eq!(d.midi("midi", &[0x90, 51, 0], &v, Instant::now()),
+        vec![Out::Pad { pad: 16, down: false, velocity: 0.0 }]);
+    // A middle pad too, so a flipped table can't pass with just the ends swapped.
+    assert_eq!(d.midi("midi", &[0x90, 40, 127], &v, Instant::now()),
+        vec![Out::Pad { pad: 5, down: true, velocity: 1.0 }]);
     // Out-of-range notes and CCs are untouched.
     assert!(d.midi("midi", &[0x90, 35, 127], &v, Instant::now()).is_empty());
+}
+
+#[test]
+fn smc_pad_leds_use_identity_pad_numbers() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let mut v = view();
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+    let t0 = t + Duration::from_millis(1600);
+    let at = |n: u64| t0 + Duration::from_millis(10 * n);
+    // Let the two-per-tick mirror fill all sixteen pads.
+    for n in 0..8 {
+        d.tick(&v, at(n));
+    }
+    // Focus the last sound: the redraw must light SMC pad 16, not pad 4.
+    v.sound = 15; // zero-based here; the device sees 16
+    v.groups[0].sounds[15].used = true;
+    let out = d.tick(&v, at(8));
+    assert!(out.contains(&midi("service", &sync_write(0x59E, [255, 66, 62]))), "{out:?}");
 }
 
 #[test]

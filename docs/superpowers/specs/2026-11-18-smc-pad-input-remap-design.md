@@ -3,12 +3,19 @@
 Date: 2026-11-18
 Branch: `feature/mvawe-smc-pad`
 
+> **Post-hardware-test amendment (2026-11-19):** the pad-number mapping below was reversed
+> by user feedback after testing on real hardware. `PAD_NUMBER` is now the identity
+> `{1..16}` for both hits and LEDs (SMC pad N = Deckard pad N). The rest of the design
+> stands. Likewise, `View.pad_*` now comes from the MK3's live route when an MK3 is
+> connected — the surface's `lib.pads` does not follow its mode buttons, so the SMC's
+> LED signature never saw a mode change. See the ledger under `.superpowers/sdd/`.
+
 ## Intent
 
 The SMC-PAD's SysEx LED mirror (previous work) lights the right physical pads for the
 focused Deckard group, but four things still don't behave like the MK3:
 
-1. **Pad numbering on input.** The LED table maps Deckard pad *i* → SMC pad
+1. **Pad numbering on input.** **(SUPERSEDED 2026-11-19: identity `{1..16}` now; the flip below is historical.)** The LED table maps Deckard pad *i* → SMC pad
    `PAD_NUMBER[i] = {13,14,15,16, 9,10,11,12, 5,6,7,8, 1,2,3,4}` — i.e. SMC 13–16 →
    Deckard 1–4, 9–12 → 5–8, 5–8 → 9–12, 1–4 → 13–16. (The request said "13-15" for
    the last group; treated as "13-16" so all 16 pads are covered and the LED table stays
@@ -30,8 +37,9 @@ scale/chord notes the MK3 plays.
 
 ## Goals
 
-- Pressing SMC pad *p* lights and plays Deckard pad `PAD_NUMBER[p]`: pad 13 plays and
-  lights sound 1, pad 9 → 5, pad 5 → 9, pad 1 → 13.
+- ~~Pressing SMC pad *p* lights and plays Deckard pad `PAD_NUMBER[p]`: pad 13 plays and
+  lights sound 1, pad 9 → 5, pad 5 → 9, pad 1 → 13.~~ **SUPERSEDED:** pad *p* lights and
+  plays Deckard pad *p* (identity), after hardware testing on 2026-11-19.
 - A press plays what the current mode says, via the same `PadRoute` logic the MK3 uses:
   - Pad mode: the pad's sound at C3 (pitch 60), from the focused group.
   - Keyboard mode: the focused sound at the pad's scale note.
@@ -195,6 +203,9 @@ are unaffected.
 - `crates/surface/src/device_tests.rs`, `apps/viewer/src/*tests.rs` — coverage.
 
 ## Testing
+
+The pad numbers in the examples below are historical (flip); the tests now assert
+identity (note 36 → pad 1, note 51 → pad 16, note 40 → pad 5).
 
 - `device_tests.rs`: `deckard.pad(13, true, 1.0)` yields `Out::Pad` and sets
   `pad_held(13)`; the SMC script turns note 48 into `Out::Pad{pad=1,down=true,v=48/127}`;

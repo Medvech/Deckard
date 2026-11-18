@@ -78,6 +78,24 @@ pub fn pending_notes(pending: &[(usize, usize, i64, i64)]) -> Vec<Live> {
         .collect()
 }
 
+/// The pad mode/base/notes device scripts mirror. With an MK3 connected its route is
+/// authoritative: the mode buttons live in Maschine's scripts, not the surface's
+/// `lib.pads`, so only the route changes when the user switches Pad/Keyboard/Chords.
+/// 128 in `notes` means "no note" for that pad.
+pub fn pad_state(route: &PadRoute) -> (String, i64, bool, Vec<i64>) {
+    let keys = route.keys.is_some();
+    let notes = route.keys.map(|(_, n)| n.to_vec()).unwrap_or_default();
+    let base = notes.first().copied().unwrap_or(60);
+    let mode = if route.chords.is_some() {
+        "chords"
+    } else if keys {
+        "keyboard"
+    } else {
+        "pad"
+    };
+    (mode.to_string(), base, keys, notes)
+}
+
 /// A held pad, as [`Touching`] keeps it: the sound it plays, that sound's Pad Touch as
 /// last seen, and the value it last sent (or counts for, in the channel-wide modes).
 #[derive(Clone, Copy)]
@@ -1084,8 +1102,29 @@ mod tests {
         let mut voices = PadVoices::default();
         let r = route(PadTouch::default());
         voices.on(4, &r, 100);
-        let changed = PadRoute { keys: Some((0, [64; 16])), ..r };
         assert_eq!(voices.off(4), vec![Live::NoteRelease { group: 0, sound: 3, pitch: PAD_PITCH }],
-            "a mode change while held must not lose the original note");
+            "the release stops the note the press started, not the current mode's");
+    }
+
+    #[test]
+    fn mk3_route_pad_state_follows_the_mk3_mode() {
+        // Pad mode: the device script has no notes to mirror.
+        assert_eq!(pad_state(&route(PadTouch::default())), ("pad".into(), 60, false, Vec::new()));
+
+        // Keyboard mode on the MK3: its notes, not the surface's own `lib.pads`,
+        // are what a device script's LED signature must see change.
+        let k = keys(PadTouch::default());
+        assert_eq!(pad_state(&k), ("keyboard".into(), 60, true, vec![
+            60, 64, 128, 128, 128, 128, 128, 128,
+            128, 128, 128, 128, 128, 128, 128, 128,
+        ]));
+
+        let c = PadRoute { chords: Some(std::array::from_fn(|_| [0; 16])), ..k };
+        // Chords mode changes the signature but keeps the same notes/base as Keys —
+        // `keyboard_chords()` is only present alongside `keyboard_pads()`.
+        assert_eq!(pad_state(&c), ("chords".into(), 60, true, vec![
+            60, 64, 128, 128, 128, 128, 128, 128,
+            128, 128, 128, 128, 128, 128, 128, 128,
+        ]));
     }
 }
