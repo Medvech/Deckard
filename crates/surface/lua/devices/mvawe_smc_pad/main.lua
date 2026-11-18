@@ -351,6 +351,22 @@ function M.open()
 end
 
 function M.close()
+  local s = st.sess
+  if s.state ~= "ready" then return end
+  -- Best-effort and synchronous: the host drops these writes when the port has
+  -- already gone, but an app quit still lets us restore the saved LEDs.
+  pcall(function()
+    -- Extinguish the five buttons while they are still armed.
+    for i = 0, BUTTONS - 1 do button_led(i, false) end
+    for i = 1, 16 do
+      deckard.midi_send("service", write_request(s.addr[i], s.orig[i]))
+    end
+    for i = 1, BUTTONS do
+      local addr = s.slot * SLOT_BYTES + (i - 1) * BUTTON_BYTES + BUTTON_AT
+      deckard.midi_send("service", write_request(addr, { s.btn_orig[i] }))
+    end
+  end)
+  s.state = "closed"
 end
 
 function M.midi(role, bytes)

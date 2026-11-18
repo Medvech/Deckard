@@ -626,3 +626,40 @@ fn smc_pad_service_throttles_rgb_writes_to_two_per_tick() {
         "the round-robin cursor advances: {second:?}"
     );
 }
+
+#[test]
+fn smc_pad_service_restores_original_pad_rgb_on_close() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    drive_handshake(&mut d, &v, t, 2, 0, 0, Some(2));
+    let out = d.close();
+    // 16 pad RGBs + 5 button Led bytes on the service port; 5 note-offs on daw.
+    assert_eq!(out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "service")).count(), 21);
+    assert_eq!(out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "daw")).count(), 5);
+    // Pad 1's record 12 at 0x550 originally held RGB [10,20,30].
+    assert!(out.contains(&midi("service", &sync_write(0x550, [10, 20, 30]))), "{out:?}");
+    // Every Led byte was FF originally; play is at 0x44.
+    assert!(out.contains(&midi("service", &sync_write_bytes(0x44, &[0xFF]))), "{out:?}");
+    for note in 25..=29 {
+        assert!(out.contains(&midi("daw", &[0x90, note, 0])), "{out:?}");
+    }
+    // Order is part of the contract: the buttons go dark while still armed,
+    // then the 16 pad RGBs are restored, then the five Led bytes.
+    let daw: Vec<Out> = out.iter().filter(|o| matches!(o, Out::Midi { role, .. } if role == "daw")).cloned().collect();
+    assert_eq!(daw, (25..=29).map(|n| midi("daw", &[0x90, n, 0])).collect::<Vec<_>>(), "{out:?}");
+    let restore_leds: Vec<Out> = (0..5).map(|i| midi("service", &sync_write_bytes(i * 23 + 22, &[0xFF]))).collect();
+    assert_eq!(&out[21..], restore_leds.as_slice(), "Led bytes restored last: {out:?}");
+    assert!(d.close().is_empty(), "the closed state must not repeat the restore");
+}
+
+#[test]
+fn smc_pad_service_close_before_ready_sends_no_writes() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    d.tick(&v, t); // only the identity query went out
+    let out = d.close();
+    assert!(out.iter().all(|o| !matches!(o, Out::Midi { role, .. } if role == "service")));
+    assert!(out.iter().all(|o| !matches!(o, Out::Midi { role, .. } if role == "daw")), "{out:?}");
+}
