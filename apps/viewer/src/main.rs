@@ -16963,7 +16963,8 @@ mod tests {
         (h.state_mut().prop_set, h.state_mut().prop_page) = (2, 2);
         layout::apply_acts(h.state_mut(), vec![layout::Act::SetParam(deckard_doc::Target::Sound(0, 0), "sequence_generation/mode", 1.0)]);
         h.run_steps(3);
-        assert_eq!(names(&h), ["MODE", "AMOUNT", "AMOUNT", "STEPS", "DIVISION", "LIVE"]);
+        // The Euclidean page exposes the Root note it writes (the sound's base key).
+        assert_eq!(names(&h), ["MODE", "AMOUNT", "AMOUNT", "STEPS", "DIVISION", "NOTE", "LIVE"]);
         shot(&mut h, "sound-generate-euclid");
         let b: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-groove-button"))).expect("the Generate button");
         click(&mut h, b.center());
