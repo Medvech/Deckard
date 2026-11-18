@@ -1135,6 +1135,10 @@ fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     scale.set("kind", v.scale_kind + 1)?;
     scale.set("root", v.scale_root)?;
     t.set("scale", scale)?;
+    t.set("pad_mode", v.pad_mode.as_str())?;
+    t.set("pad_base", v.pad_base)?;
+    t.set("pad_keys", v.pad_keys)?;
+    t.set("pad_notes", lua.create_sequence_from(v.pad_notes.iter().copied())?)?;
     t.set("follow", v.follow)?;
     let grid = lua.create_table()?;
     grid.set("perform", v.grid.perform)?;

@@ -70,6 +70,17 @@ pub struct View {
     /// the bank (0..15), as `deckard_model::scale_tables` lists them.
     pub scale_bank: i64,
     pub scale_kind: i64,
+    /// The pads' mode from the main Lua VM: "pad", "keyboard", "chords" or "step".
+    /// Shown to device scripts through `deckard.state()` so their LEDs can follow it.
+    pub pad_mode: String,
+    /// Keyboard mode's lowest pad (MIDI note), moved by octaves and semitones.
+    pub pad_base: i64,
+    /// Whether the pads play scale/chord notes: `lib.pads.keys()`, true only for
+    /// "keyboard" and "chords" (not step+keyboard).
+    pub pad_keys: bool,
+    /// The note each pad plays in the current mode, from 1 (128 means "none").
+    /// Meaningful only when `pad_keys` is true.
+    pub pad_notes: Vec<i64>,
     /// The user chords: 16 sets of 12, each the semitones above the root it plays
     /// (none: an empty chord).
     pub user_chords: Vec<Vec<Vec<i64>>>,
@@ -1375,6 +1386,25 @@ impl Surface {
         let require: Function = run.lua.globals().get("require").ok()?;
         let mode: String = require.call::<Table>("lib.pads").ok()?.get("mode").ok()?;
         Some((self.page(), mode))
+    }
+
+    /// The pads' mode, base note, whether they play keys, and the note each plays,
+    /// read from the main Lua VM's `lib.pads`. Filled into [`View`] each frame so
+    /// device scripts can mirror the pads (LEDs and note generation).
+    pub fn pads_state(&self) -> (String, i64, bool, Vec<i64>) {
+        let fallback = || ("pad".to_string(), 60, false, Vec::new());
+        let Some(run) = self.run.as_ref() else { return fallback() };
+        let Ok(require) = run.lua.globals().get::<Function>("require") else { return fallback() };
+        let Ok(pads) = require.call::<Table>("lib.pads") else { return fallback() };
+        let mode = pads.get("mode").unwrap_or_else(|_| "pad".to_string());
+        let base = pads.get("base").unwrap_or(60);
+        let keys = pads.get::<Function>("keys").and_then(|f| f.call::<bool>(())).unwrap_or(false);
+        let notes = pads
+            .get::<Function>("notes")
+            .and_then(|f| f.call::<Table>(()))
+            .and_then(|t| t.sequence_values::<i64>().collect::<mlua::Result<Vec<i64>>>())
+            .unwrap_or_default();
+        (mode, base, keys, notes)
     }
 
     /// Come back to a saved project's [`Surface::screen`]: `global.lua`'s `restore`.

@@ -838,3 +838,22 @@ fn smc_pad_takes_its_pad_notes_itself() {
     assert!(smc.exclusive.iter().any(|r| r == "midi"), "{smc:?}");
     assert!(smc.drums.is_empty(), "{smc:?}");
 }
+
+#[test]
+fn pad_state_reaches_device_scripts() {
+    let (_tmp, dir) = test_device(r#"
+      return { open = function()
+        local s = deckard.state()
+        deckard.message(table.concat({ s.pad_mode, s.pad_base,
+          tostring(s.pad_keys), #s.pad_notes, s.pad_notes[1] }, ":"))
+      end }"#);
+    let mut d = Device::new("test", Some(dir));
+    let mut v = view();
+    v.pad_mode = "keyboard".into();
+    v.pad_base = 62;
+    v.pad_keys = true;
+    v.pad_notes = vec![62; 16];
+
+    assert!(d.open(&v, Instant::now()).contains(
+        &Out::Message("keyboard:62:true:16:62".into())), "state not visible to the device VM");
+}

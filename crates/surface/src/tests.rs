@@ -3918,3 +3918,15 @@ fn a_long_pad_name_wraps_onto_a_second_line() {
     assert!(wrapped("dt02_kick-punchy_crunch"), "{texts:?}");
     assert!(texts.iter().any(|t| t == "Kick"), "a short name, one line: {texts:?}");
 }
+
+#[test]
+fn pads_state_follows_the_main_pad_mode() {
+    let (mut s, v) = (Surface::new(), view());
+    s.tick(&v, Instant::now());
+    assert_eq!(s.pads_state().0, "pad");
+    press(&mut s, &v, "BUTTON_KEYBOARD");
+    let (mode, _, keys, notes) = s.pads_state();
+    assert_eq!(mode, "keyboard");
+    assert!(keys);
+    assert_eq!(notes.len(), 16);
+}

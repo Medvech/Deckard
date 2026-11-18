@@ -5395,7 +5395,12 @@ impl App {
             euclid: self.euclid_view(c.level, c.page, head),
             random: self.random_view(c.level, c.page, head),
         };
+        let (pad_mode, pad_base, pad_keys, pad_notes) = self.surface.pads_state();
         let mut v = View {
+            pad_mode,
+            pad_base,
+            pad_keys,
+            pad_notes,
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
             settings: self.surface_settings.clone(),
             lock: self.lock_view(),
