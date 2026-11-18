@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::Action;
 use crate::device::{Device, Out, Print, PrintedNote, devices};
@@ -22,6 +22,62 @@ fn test_device(main: &str) -> (tempfile::TempDir, PathBuf) {
 
 fn midi(role: &str, bytes: &[u8]) -> Out {
     Out::Midi { role: role.into(), bytes: bytes.to_vec() }
+}
+
+fn hex(s: &str) -> Vec<u8> {
+    s.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
+}
+
+const IDENTITY_QUERY: &str = "F0 00 32 45 00 00 00 40 7F F7";
+const STATE_READ: &str = "F0 00 32 0D 41 00 00 00 02 00 00 00 00 40 01 00 00 6F 01 F7";
+const IDENTITY_REPLY: &str =
+    "F0 00 32 45 58 01 00 40 29 4D 06 35 01 15 08 51 2F 30 60 4C \
+     01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0A F7";
+// Captured state block: bank 2, slot 0, toggle 0.
+#[allow(dead_code)]
+const STATE_REPLY: &str =
+    "F0 00 32 0D 21 01 00 00 02 00 00 00 00 0C 00 00 78 00 32 04 \
+     00 00 02 00 01 01 00 00 3D F7";
+
+/// The SINCO 8→7 transport: an LSB-first accumulator, wrapped in F0 … F7.
+fn pack7(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0xF0];
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for &b in data {
+        acc |= u32::from(b) << bits;
+        bits += 8;
+        while bits >= 7 {
+            out.push((acc & 0x7F) as u8);
+            acc >>= 7;
+            bits -= 7;
+        }
+    }
+    if bits > 0 {
+        out.push((acc & 0x7F) as u8);
+    }
+    out.push(0xF7);
+    out
+}
+
+/// Independent encoder for logical `00 59 cmd len24 payload ~sum(payload)` replies.
+fn sync_reply(cmd: u8, payload: &[u8]) -> Vec<u8> {
+    let len = payload.len() as u32;
+    let mut logical = vec![0x00, 0x59, cmd];
+    logical.extend_from_slice(&len.to_le_bytes()[..3]);
+    logical.extend_from_slice(payload);
+    let sum: u32 = payload.iter().map(|&b| u32::from(b)).sum();
+    logical.push(!sum as u8);
+    pack7(&logical)
+}
+
+/// Region-4 state block: the 12 data bytes carry bank at 6, slot at 10, toggle at 11.
+#[allow(dead_code)]
+fn state_reply(bank: u8, slot: u8, toggle: u8) -> Vec<u8> {
+    sync_reply(
+        0x23,
+        &[4, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, bank, 0, 0, 0, slot, toggle],
+    )
 }
 
 #[test]
@@ -124,4 +180,78 @@ fn only_the_devices_own_files_reload_it() {
     std::fs::create_dir_all(dir.join("lib")).unwrap();
     std::fs::write(dir.join("lib/mine.lua"), "return {}").unwrap();
     assert!(d.reload(), "lib/ is shared");
+}
+
+#[test]
+fn mvawe_smc_pad_knobs_turn_the_mk3_knobs() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    assert_eq!(d.error(), None);
+    let v = view();
+    let out = d.midi("midi", &[0xB0, 36, 70], &v, Instant::now());
+    assert!(!out.iter().any(|o| matches!(o, Out::App(Action::Turn { .. }))), "{out:?}");
+    let out = d.midi("midi", &[0xB0, 36, 71], &v, Instant::now());
+    assert!(out.contains(&Out::App(Action::Turn { knob: 0, inc: 1.0 / 127.0, fine: false })), "{out:?}");
+    let out = d.midi("midi", &[0xB0, 36, 70], &v, Instant::now());
+    assert!(!out.iter().any(|o| matches!(o, Out::App(Action::Turn { .. }))), "one back is flicker");
+    let out = d.midi("midi", &[0xB0, 36, 69], &v, Instant::now());
+    assert!(out.contains(&Out::App(Action::Turn { knob: 0, inc: -2.0 / 127.0, fine: false })), "{out:?}");
+
+    let out = d.midi("daw", &[0x90, 17, 127], &v, Instant::now());
+    assert!(out.contains(&Out::App(Action::Play)), "{out:?}");
+    let out = d.midi("daw", &[0x90, 18, 127], &v, Instant::now());
+    assert!(out.contains(&Out::App(Action::Stop)), "{out:?}");
+    let out = d.midi("daw", &[0x90, 19, 127], &v, Instant::now());
+    assert!(out.contains(&Out::App(Action::Record { on: true, count_in: false })), "{out:?}");
+}
+
+#[test]
+fn mvawe_smc_pad_play_cc_toggles_transport() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    assert_eq!(d.error(), None);
+    let v = view();
+    // The Play button is configured as CC 27 (127 press, 0 release), on either port.
+    for role in ["midi", "daw"] {
+        let out = d.midi(role, &[0xB0, 27, 127], &v, Instant::now());
+        assert!(out.contains(&Out::App(Action::Play)), "{role}: {out:?}");
+        assert!(out.contains(&midi(role, &[0xB0, 27, 127])), "LED feedback: {role}: {out:?}");
+        let out = d.midi(role, &[0xB0, 27, 0], &v, Instant::now());
+        assert!(!out.iter().any(|o| matches!(o, Out::App(Action::Play | Action::Stop))), "{role}: {out:?}");
+    }
+    // MK3's PLAY toggles: pressing again while playing stops.
+    let mut playing = view();
+    playing.playing = true;
+    let out = d.midi("midi", &[0xB0, 27, 127], &playing, Instant::now());
+    assert!(out.contains(&Out::App(Action::Stop)), "{out:?}");
+}
+
+#[test]
+fn smc_pad_service_handshake_starts_and_advances() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    assert_eq!(d.error(), None);
+    let v = view();
+    let t = Instant::now();
+
+    assert_eq!(d.tick(&v, t), [midi("service", &hex(IDENTITY_QUERY))]);
+
+    // A malformed reply is dropped; the pending request stays pending.
+    d.midi("service", &[0xF0, 0x00, 0x32, 0x00, 0xF7], &v, t);
+    assert!(d.tick(&v, t + Duration::from_millis(50)).is_empty());
+
+    // The captured identity reply advances to the state read.
+    d.midi("service", &hex(IDENTITY_REPLY), &v, t + Duration::from_millis(50));
+    assert_eq!(
+        d.tick(&v, t + Duration::from_millis(100)),
+        [midi("service", &hex(STATE_READ))]
+    );
+}
+
+#[test]
+fn smc_pad_service_handshake_restarts_after_timeout() {
+    let mut d = Device::new("mvawe_smc_pad", None);
+    let v = view();
+    let t = Instant::now();
+    assert_eq!(d.tick(&v, t), [midi("service", &hex(IDENTITY_QUERY))]);
+    assert!(d.tick(&v, t + Duration::from_secs(6)).is_empty(), "pending request isn't repeated");
+    // The next tick restarts from the identity query.
+    assert_eq!(d.tick(&v, t + Duration::from_secs(6) + Duration::from_millis(40)), [midi("service", &hex(IDENTITY_QUERY))]);
 }
